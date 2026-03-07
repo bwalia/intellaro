@@ -236,9 +236,6 @@ assert_status "Proxy request to / returns 200" \
 # Wait for rate limit window to reset (MCP tests above may have consumed tokens)
 sleep 6
 echo "  Testing round-robin load balancing (multiple successful proxied requests)..."
-# Note: Response body passthrough has a known limitation (frame_ref_bytes
-# returns None), so we verify that multiple consecutive requests all succeed
-# with 200, confirming the proxy engine distributes across backends.
 success_count=0
 for i in $(seq 1 9); do
     status=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: test-upstream" "${SERVER}/") || true
@@ -324,8 +321,11 @@ section "4. Caching"
 # Wait for rate limit window to expire so caching tests pass
 sleep 6
 
+# Use a unique path per test run to guarantee a cold cache
+CACHE_TEST_PATH="/cache-test-$$"
+
 # 4.1 First request is a cache miss
-miss_headers=$(curl -sI -H "Host: test-upstream" "${SERVER}/cache-test-path") || true
+miss_headers=$(curl -sI -H "Host: test-upstream" "${SERVER}${CACHE_TEST_PATH}") || true
 if echo "$miss_headers" | grep -iqF "X-Intellaro-Cache: HIT"; then
     fail "First request is a cache MISS" "no HIT header" "HIT header present"
 else
@@ -333,16 +333,19 @@ else
 fi
 
 # 4.2 Second request to the same path should be a cache HIT
-# Note: cache body capture has a known limitation, but the HIT header
-# should still be set if the entry was stored.
-hit_headers=$(curl -sI -H "Host: test-upstream" "${SERVER}/cache-test-path") || true
+hit_headers=$(curl -sI -H "Host: test-upstream" "${SERVER}${CACHE_TEST_PATH}") || true
 if echo "$hit_headers" | grep -iqF "X-Intellaro-Cache: HIT"; then
     pass "Second request is a cache HIT (X-Intellaro-Cache: HIT)"
 else
-    # Known limitation: body capture may not work, so entry may not be stored.
-    # Mark as a known issue rather than hard failure.
-    echo -e "  ${YELLOW}SKIP${NC} Second request cache HIT (known body-capture limitation)"
-    TOTAL=$((TOTAL + 1))
+    fail "Second request is a cache HIT (X-Intellaro-Cache: HIT)" "HIT header present" "(header missing)"
+fi
+
+# 4.3 Cache HIT must include the response body (not empty)
+hit_body=$(curl -s -H "Host: test-upstream" "${SERVER}${CACHE_TEST_PATH}") || true
+if [ -n "$hit_body" ]; then
+    pass "Cache HIT response body is non-empty"
+else
+    fail "Cache HIT response body is non-empty" "non-empty body" "(empty body)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────
