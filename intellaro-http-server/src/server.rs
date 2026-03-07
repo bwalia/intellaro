@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::cache::CacheLayer;
-use crate::config::{ConfigManager, ListenerConfig};
+use crate::config::{ConfigManager, ListenerConfig, StaticRootConfig};
 use crate::logging;
 use crate::proxy::ProxyEngine;
 use crate::security::SecurityEngine;
@@ -29,6 +29,7 @@ pub struct AppState {
     pub proxy_engine: ProxyEngine,
     pub cache_layer: CacheLayer,
     pub security_engine: SecurityEngine,
+    pub static_roots: Vec<StaticRootConfig>,
 }
 
 /// Start the HTTP server with all configured listeners.
@@ -46,6 +47,7 @@ pub async fn run(
         proxy_engine: ProxyEngine::new(&config.upstreams),
         cache_layer: CacheLayer::new(&config.cache),
         security_engine: SecurityEngine::new(&config.security),
+        static_roots: config.static_roots.clone(),
     });
 
     let mut listener_handles = Vec::new();
@@ -173,7 +175,16 @@ async fn handle_request(
 
     metrics::counter!("cache_misses_total").increment(1);
 
-    // 3. Proxy to upstream
+    // 3. Static file serving
+    if let Some(response) = serve_static_file(&path, &state.static_roots).await {
+        state.cache_layer.store(&req, &response).await;
+        let status = response.status().as_u16();
+        logging::record_response(status, &method);
+        logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+        return Ok(response);
+    }
+
+    // 4. Proxy to upstream
     let response = match state.proxy_engine.forward(&req).await {
         Ok(resp) => resp,
         Err(err) => {
@@ -194,4 +205,68 @@ async fn handle_request(
     logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
 
     Ok(response)
+}
+
+/// Serve a static file if the request path matches a configured static root.
+async fn serve_static_file(
+    request_path: &str,
+    static_roots: &[StaticRootConfig],
+) -> Option<Response<BoxBody>> {
+    for root in static_roots {
+        if !request_path.starts_with(&root.url_prefix) {
+            continue;
+        }
+
+        let relative = request_path.strip_prefix(&root.url_prefix).unwrap_or("");
+        // Default to index.html for the root path
+        let relative = if relative.is_empty() || relative == "/" {
+            "index.html"
+        } else {
+            relative.trim_start_matches('/')
+        };
+
+        // Prevent path traversal
+        if relative.contains("..") {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(BoxBody::new(hyper::body::Bytes::from("Forbidden")))
+                    .unwrap(),
+            );
+        }
+
+        let file_path = root.directory.join(relative);
+        match tokio::fs::read(&file_path).await {
+            Ok(contents) => {
+                let content_type = guess_content_type(&file_path);
+                return Some(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", content_type)
+                        .body(BoxBody::new(hyper::body::Bytes::from(contents)))
+                        .unwrap(),
+                );
+            }
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Guess the Content-Type based on file extension.
+fn guess_content_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css",
+        Some("js") => "application/javascript",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("txt") => "text/plain",
+        _ => "application/octet-stream",
+    }
 }

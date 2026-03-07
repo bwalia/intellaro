@@ -44,6 +44,10 @@ security:
     max_requests: 100
     window_secs: 60
 
+static_roots:
+  - url_prefix: "/"
+    directory: "/usr/local/share/intellaro/static"
+
 logging:
   level: debug
   format: json

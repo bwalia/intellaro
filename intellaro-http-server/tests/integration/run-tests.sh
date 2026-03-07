@@ -263,7 +263,7 @@ assert_body_contains "Proxy passes /api/data path through" \
 # 2.4 Proxy returns appropriate Content-Type from backend
 assert_header_contains "Proxy preserves Content-Type from backend" \
     "content-type" "text/plain" \
-    -H "Host: test-upstream" "${SERVER}/"
+    -H "Host: test-upstream" "${SERVER}/healthz"
 
 # ─────────────────────────────────────────────────────────────────────
 section "3. Security Policies"
@@ -424,7 +424,45 @@ assert_status "Proxy still works after config reload" \
     -H "Host: test-upstream" "${SERVER}/"
 
 # ─────────────────────────────────────────────────────────────────────
-section "8. Edge Cases & Error Handling"
+section "8. Static File Serving"
+# ─────────────────────────────────────────────────────────────────────
+
+# Wait for rate limit window to reset
+sleep 6
+
+# 8.1 /index.html returns 200
+assert_status "GET /index.html returns 200" \
+    "200" \
+    -H "Host: test-upstream" "${SERVER}/index.html"
+
+# 8.2 /index.html has HTML content type
+assert_header_contains "Static /index.html has text/html content type" \
+    "content-type" "text/html" \
+    -H "Host: test-upstream" "${SERVER}/index.html"
+
+# 8.3 /index.html body contains expected content
+static_tmp=$(mktemp)
+curl -s -H "Host: test-upstream" "${SERVER}/index.html" > "$static_tmp" || true
+if grep -qF "DOCTYPE html" "$static_tmp"; then
+    pass "Static /index.html contains DOCTYPE"
+else
+    fail "Static /index.html contains DOCTYPE" "body contains 'DOCTYPE html'" "$(head -c 200 "$static_tmp")"
+fi
+
+if grep -qF "<title>" "$static_tmp"; then
+    pass "Static /index.html contains page title"
+else
+    fail "Static /index.html contains page title" "body contains '<title>'" "$(head -c 200 "$static_tmp")"
+fi
+rm -f "$static_tmp"
+
+# 8.4 Path traversal is blocked (use --path-as-is to prevent curl normalising ../)
+assert_status "Path traversal returns 403" \
+    "403" \
+    --path-as-is -H "Host: test-upstream" "${SERVER}/static/../../etc/passwd"
+
+# ─────────────────────────────────────────────────────────────────────
+section "9. Edge Cases & Error Handling"
 # ─────────────────────────────────────────────────────────────────────
 
 # 8.1 Request with no matching upstream (unknown Host header)
