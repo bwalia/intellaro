@@ -1,0 +1,175 @@
+---
+# Example: Canary deployment — send 10% of traffic to the canary backend,
+# with header-based override for testing.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoutingPolicy
+metadata:
+  name: api-canary
+  namespace: default
+spec:
+  description: "Canary deployment for api-service v2.1"
+  policyType: canary
+  priority: 200
+  enabled: true
+  targetRefs:
+    - kind: IntellaroVHost
+      name: api-example
+  canary:
+    primaryGroup: production-api-service
+    canaryGroup: production-api-service-canary
+    canaryWeight: 10
+    canaryHeader: X-Canary
+    canaryCookie: intellaro_canary
+    adaptive: true
+    maxAdaptiveWeight: 50
+
+---
+# Example: SLA/tenant-based priority routing — premium tenants get
+# dedicated backends and higher rate limits.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoutingPolicy
+metadata:
+  name: sla-tiering
+  namespace: default
+spec:
+  description: "SLA-based routing for multi-tenant API"
+  policyType: slaPriority
+  priority: 300
+  enabled: true
+  targetRefs:
+    - kind: IntellaroVHost
+      name: api-example
+  slaRouting:
+    identifier:
+      header: X-Tenant-Tier
+    tiers:
+      - name: premium
+        value: premium
+        dedicatedBackend: production-api-premium
+        rateMultiplier: 5.0
+        priorityLevel: 300
+      - name: standard
+        value: standard
+        rateMultiplier: 1.0
+        priorityLevel: 200
+      - name: free
+        value: free
+        rateMultiplier: 0.5
+        priorityLevel: 100
+
+---
+# Example: Weighted traffic split — distribute traffic across
+# three backend versions for A/B testing.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoutingPolicy
+metadata:
+  name: ab-test-split
+  namespace: default
+spec:
+  description: "A/B/C traffic split for checkout flow experiment"
+  policyType: general
+  priority: 150
+  enabled: true
+  targetRefs:
+    - kind: IntellaroRoute
+      name: checkout-route
+  matchConditions:
+    pathPrefix: /checkout/
+    methods:
+      - GET
+      - POST
+  trafficSplit:
+    - backendGroup: production-checkout-v1
+      weight: 70
+      responseHeader: X-Variant-A
+    - backendGroup: production-checkout-v2
+      weight: 20
+      responseHeader: X-Variant-B
+    - backendGroup: production-checkout-v3
+      weight: 10
+      responseHeader: X-Variant-C
+
+---
+# Example: Failover policy — automatically switch to the fallback
+# backend group when the primary exceeds error thresholds.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoutingPolicy
+metadata:
+  name: api-failover
+  namespace: default
+spec:
+  description: "Failover from primary to disaster-recovery backends"
+  policyType: failover
+  priority: 400
+  enabled: true
+  targetRefs:
+    - kind: BackendGroup
+      name: production-api-service
+  failover:
+    primaryGroup: production-api-service
+    fallbackGroup: dr-api-service
+    errorThreshold: 0.3
+    consecutiveFailures: 5
+    recoverySecs: 120
+
+---
+# Example: AI-assisted routing — use classification and anomaly
+# detection to route requests intelligently.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoutingPolicy
+metadata:
+  name: ai-routing
+  namespace: default
+spec:
+  description: "AI-powered adaptive routing for mixed workloads"
+  policyType: aiAssisted
+  priority: 250
+  enabled: true
+  targetRefs:
+    - kind: IntellaroVHost
+      name: api-example
+  aiRouting:
+    predictiveEnabled: true
+    anomalyRerouting: true
+    classificationEnabled: true
+    classRoutes:
+      - classLabel: api
+        backendGroup: production-api-service
+      - classLabel: static
+        backendGroup: production-cdn-service
+      - classLabel: heavy_compute
+        backendGroup: production-gpu-service
+
+---
+# Example: Header manipulation and per-policy rate limiting —
+# inject tracing headers and enforce strict rate limits for
+# mobile clients.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoutingPolicy
+metadata:
+  name: mobile-policy
+  namespace: default
+spec:
+  description: "Mobile client policy with rate limiting and headers"
+  policyType: general
+  priority: 180
+  enabled: true
+  matchConditions:
+    headers:
+      - name: X-Client-Platform
+        exact: mobile
+  headers:
+    requestSet:
+      - name: X-Routed-By
+        value: intellaro-mobile-policy
+      - name: X-Request-Source
+        value: mobile
+    responseSet:
+      - name: X-Mobile-Optimized
+        value: "true"
+    requestRemove:
+      - X-Debug
+  rateLimit:
+    maxRequests: 500
+    windowSecs: 60
+    key: clientIp

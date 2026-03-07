@@ -1,0 +1,98 @@
+---
+# Example: Auto-discover all services in the "production" namespace
+# using the standard Endpoints v1 API.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroServiceDiscovery
+metadata:
+  name: production-discovery
+  namespace: default
+spec:
+  mode: kubernetes
+  namespaces:
+    - production
+  labelSelector: "app.kubernetes.io/managed-by=intellaro"
+  pollIntervalSecs: 30
+  portDiscovery: allNamed
+  autoRegister: true
+  groupNameTemplate: "{namespace}-{name}"
+  defaultLbStrategy: round_robin
+  healthCheck:
+    path: /healthz
+    intervalSecs: 10
+    timeoutSecs: 5
+    unhealthyThreshold: 3
+  excludeServices:
+    - namePattern: "kube-*"
+      namespacePattern: "kube-system"
+    - labelSelector: "intellaro.io/exclude=true"
+
+---
+# Example: Cluster-wide EndpointSlice discovery (preferred for large clusters).
+# Discovers all services across all namespaces, excluding system services.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroServiceDiscovery
+metadata:
+  name: cluster-wide-discovery
+  namespace: default
+spec:
+  mode: endpointSlice
+  clusterWide: true
+  pollIntervalSecs: 15
+  portDiscovery: allNamed
+  autoRegister: true
+  groupNameTemplate: "{namespace}-{name}"
+  defaultLbStrategy: least_connections
+  excludeServices:
+    - namespacePattern: "kube-*"
+    - namespacePattern: "istio-*"
+    - namePattern: "kubernetes"
+  includeServices:
+    - labelSelector: "intellaro.io/discover=true"
+
+---
+# Example: DNS-based discovery for services in specific namespaces,
+# only exposing named HTTP ports.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroServiceDiscovery
+metadata:
+  name: dns-discovery
+  namespace: default
+spec:
+  mode: dns
+  namespaces:
+    - staging
+    - qa
+  portDiscovery:
+    byName:
+      - http
+      - grpc
+  autoRegister: true
+  groupNameTemplate: "{namespace}-{name}"
+  defaultLbStrategy: round_robin
+
+---
+# Example: Cross-cluster discovery aggregating services from
+# a secondary cluster.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroServiceDiscovery
+metadata:
+  name: multi-cluster-discovery
+  namespace: default
+spec:
+  mode: kubernetes
+  clusterWide: true
+  pollIntervalSecs: 60
+  autoRegister: true
+  groupNameTemplate: "{namespace}-{name}"
+  defaultLbStrategy: weighted_round_robin
+  crossCluster:
+    enabled: true
+    clusters:
+      - name: us-west-2
+        kubeconfigSecret: us-west-2-kubeconfig
+        kubeconfigNamespace: intellaro-system
+        weight: 100
+      - name: eu-west-1
+        kubeconfigSecret: eu-west-1-kubeconfig
+        kubeconfigNamespace: intellaro-system
+        weight: 80

@@ -1,0 +1,328 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellaroroutingpolicies.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    kind: IntellaroRoutingPolicy
+    plural: intellaroroutingpolicies
+    singular: intellaroroutingpolicy
+    shortNames:
+      - irp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                description:
+                  type: string
+                  description: Human-readable description of this policy.
+                policyType:
+                  type: string
+                  description: "Policy type categorization."
+                  enum:
+                    - general
+                    - canary
+                    - slaPriority
+                    - mirror
+                    - failover
+                    - aiAssisted
+                  default: general
+                priority:
+                  type: integer
+                  description: "Priority (higher = evaluated first). Default: 100."
+                  default: 100
+                enabled:
+                  type: boolean
+                  description: Whether this policy is currently active.
+                  default: true
+                targetRefs:
+                  type: array
+                  description: Target references this policy applies to.
+                  items:
+                    type: object
+                    required:
+                      - kind
+                      - name
+                    properties:
+                      kind:
+                        type: string
+                        description: "Kind of target: IntellaroVHost, IntellaroRoute, or BackendGroup."
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                matchConditions:
+                  type: object
+                  description: Match conditions for activating this routing policy.
+                  properties:
+                    headers:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          exact:
+                            type: string
+                          regex:
+                            type: string
+                          present:
+                            type: boolean
+                            default: false
+                    cookies:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          exact:
+                            type: string
+                          regex:
+                            type: string
+                    queryParams:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          exact:
+                            type: string
+                          regex:
+                            type: string
+                    sourceCidrs:
+                      type: array
+                      items:
+                        type: string
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    contentType:
+                      type: string
+                    pathPrefix:
+                      type: string
+                    pathRegex:
+                      type: string
+                trafficSplit:
+                  type: array
+                  description: Traffic splitting rules.
+                  items:
+                    type: object
+                    required:
+                      - backendGroup
+                      - weight
+                    properties:
+                      backendGroup:
+                        type: string
+                      weight:
+                        type: integer
+                        minimum: 0
+                        maximum: 100
+                      responseHeader:
+                        type: string
+                slaRouting:
+                  type: object
+                  description: SLA/tenant-based priority routing.
+                  properties:
+                    identifier:
+                      description: How to extract the SLA tier from a request.
+                      x-kubernetes-preserve-unknown-fields: true
+                    tiers:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - value
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                          dedicatedBackend:
+                            type: string
+                          rateMultiplier:
+                            type: number
+                            default: 1.0
+                          priorityLevel:
+                            type: integer
+                            default: 100
+                canary:
+                  type: object
+                  description: Canary/blue-green deployment configuration.
+                  required:
+                    - primaryGroup
+                    - canaryGroup
+                  properties:
+                    primaryGroup:
+                      type: string
+                    canaryGroup:
+                      type: string
+                    canaryWeight:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      default: 0
+                    canaryHeader:
+                      type: string
+                    canaryCookie:
+                      type: string
+                    adaptive:
+                      type: boolean
+                      default: false
+                    maxAdaptiveWeight:
+                      type: integer
+                      default: 50
+                failover:
+                  type: object
+                  description: Failover/fallback policy configuration.
+                  required:
+                    - primaryGroup
+                    - fallbackGroup
+                  properties:
+                    primaryGroup:
+                      type: string
+                    fallbackGroup:
+                      type: string
+                    errorThreshold:
+                      type: number
+                      default: 0.5
+                    consecutiveFailures:
+                      type: integer
+                      default: 5
+                    recoverySecs:
+                      type: integer
+                      default: 60
+                aiRouting:
+                  type: object
+                  description: AI-assisted routing configuration.
+                  properties:
+                    predictiveEnabled:
+                      type: boolean
+                      default: false
+                    anomalyRerouting:
+                      type: boolean
+                      default: false
+                    classificationEnabled:
+                      type: boolean
+                      default: false
+                    classRoutes:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - classLabel
+                          - backendGroup
+                        properties:
+                          classLabel:
+                            type: string
+                          backendGroup:
+                            type: string
+                headers:
+                  type: object
+                  description: Request/response header manipulation.
+                  properties:
+                    requestSet:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - value
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                    responseSet:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - value
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                    requestRemove:
+                      type: array
+                      items:
+                        type: string
+                    responseRemove:
+                      type: array
+                      items:
+                        type: string
+                rateLimit:
+                  type: object
+                  description: Per-policy rate limiting.
+                  required:
+                    - maxRequests
+                  properties:
+                    maxRequests:
+                      type: integer
+                    windowSecs:
+                      type: integer
+                      default: 60
+                    key:
+                      description: "Rate limit key type."
+                      x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                synced:
+                  type: boolean
+                lastSyncedAt:
+                  type: string
+                appliedTargets:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Type
+          type: string
+          jsonPath: .spec.policyType
+        - name: Priority
+          type: integer
+          jsonPath: .spec.priority
+        - name: Synced
+          type: string
+          jsonPath: .status.synced
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

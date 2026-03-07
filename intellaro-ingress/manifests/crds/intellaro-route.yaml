@@ -1,0 +1,181 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellaroroutes.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    kind: IntellaroRoute
+    plural: intellaroroutes
+    singular: intellaroroute
+    shortNames:
+      - irt
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - vhostRef
+                - match
+                - backend
+              properties:
+                vhostRef:
+                  type: string
+                  description: Reference to the parent IntellaroVHost.
+                match:
+                  type: object
+                  properties:
+                    pathPrefix:
+                      type: string
+                    pathExact:
+                      type: string
+                    pathRegex:
+                      type: string
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    headerMatches:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          exact:
+                            type: string
+                          regex:
+                            type: string
+                backend:
+                  type: object
+                  required:
+                    - serviceName
+                    - servicePort
+                  properties:
+                    serviceName:
+                      type: string
+                    servicePort:
+                      type: integer
+                    namespace:
+                      type: string
+                trafficSplit:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - backend
+                      - weight
+                    properties:
+                      backend:
+                        type: object
+                        properties:
+                          serviceName:
+                            type: string
+                          servicePort:
+                            type: integer
+                          namespace:
+                            type: string
+                      weight:
+                        type: integer
+                        minimum: 0
+                        maximum: 100
+                rewrite:
+                  type: object
+                  properties:
+                    replacePathPrefix:
+                      type: string
+                    replaceHost:
+                      type: string
+                headers:
+                  type: object
+                  properties:
+                    requestSet:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                    responseSet:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                    requestRemove:
+                      type: array
+                      items:
+                        type: string
+                    responseRemove:
+                      type: array
+                      items:
+                        type: string
+                timeoutSecs:
+                  type: integer
+                retry:
+                  type: object
+                  properties:
+                    maxRetries:
+                      type: integer
+                    retryOnStatus:
+                      type: array
+                      items:
+                        type: integer
+                    perRetryTimeoutSecs:
+                      type: integer
+                priority:
+                  type: integer
+                  default: 100
+            status:
+              type: object
+              properties:
+                synced:
+                  type: boolean
+                lastSyncedAt:
+                  type: string
+                observedGeneration:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: VHost
+          type: string
+          jsonPath: .spec.vhostRef
+        - name: Path
+          type: string
+          jsonPath: .spec.match.pathPrefix
+        - name: Synced
+          type: string
+          jsonPath: .status.synced
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

@@ -1,0 +1,176 @@
+---
+# Example: Virtual host for api.example.com with TLS
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroVHost
+metadata:
+  name: api-example
+  namespace: default
+spec:
+  hostname: api.example.com
+  aliases:
+    - www.api.example.com
+  tls:
+    enabled: true
+    secretName: api-example-tls
+    minVersion: "1.2"
+  upstream: api-backend
+  lbPolicyRef: api-lb-policy
+  securityPolicyRef: api-security
+  cachePolicyRef: api-cache
+
+---
+# Example: Route /v1/* to the API backend service
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: api-v1-route
+  namespace: default
+spec:
+  vhostRef: api-example
+  match:
+    pathPrefix: /v1/
+    methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+  backend:
+    serviceName: api-service
+    servicePort: 8080
+  timeoutSecs: 30
+  retry:
+    maxRetries: 2
+    retryOnStatus:
+      - 502
+      - 503
+    perRetryTimeoutSecs: 10
+  priority: 200
+
+---
+# Example: Canary route splitting 90/10 traffic
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: api-canary-route
+  namespace: default
+spec:
+  vhostRef: api-example
+  match:
+    pathPrefix: /v2/
+    headerMatches:
+      - name: X-Canary
+        exact: "true"
+  backend:
+    serviceName: api-service-v2
+    servicePort: 8080
+  trafficSplit:
+    - backend:
+        serviceName: api-service
+        servicePort: 8080
+      weight: 90
+    - backend:
+        serviceName: api-service-v2
+        servicePort: 8080
+      weight: 10
+  priority: 150
+
+---
+# Example: Load balancing with least-connections and health checks
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroLBPolicy
+metadata:
+  name: api-lb-policy
+  namespace: default
+spec:
+  strategy: least_connections
+  healthCheck:
+    path: /healthz
+    intervalSecs: 10
+    timeoutSecs: 5
+    unhealthyThreshold: 3
+    healthyThreshold: 2
+    expectedStatus: 200
+  stickySession:
+    mode: cookie
+    cookieName: INTELLARO_SESSION
+    cookieTtlSecs: 3600
+  maxConnectionsPerBackend: 100
+  slowStartSecs: 30
+
+---
+# Example: Security policy with JWT, rate limiting, and CORS
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroSecurityPolicy
+metadata:
+  name: api-security
+  namespace: default
+spec:
+  jwt:
+    enabled: true
+    secretRef: jwt-signing-key
+    issuer: https://auth.example.com
+    audience: api.example.com
+    forwardClaims: true
+  ipBlock:
+    - "10.0.0.0/8"
+  rateLimit:
+    enabled: true
+    maxRequests: 1000
+    windowSecs: 60
+    key: client_ip
+    statusCode: 429
+  cors:
+    allowOrigins:
+      - "https://app.example.com"
+      - "https://admin.example.com"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Authorization
+      - Content-Type
+    exposeHeaders:
+      - X-Request-Id
+    allowCredentials: true
+    maxAgeSecs: 86400
+  targetRefs:
+    - kind: IntellaroVHost
+      name: api-example
+
+---
+# Example: Caching policy with path-specific rules
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroCachePolicy
+metadata:
+  name: api-cache
+  namespace: default
+spec:
+  enabled: true
+  defaultTtlSecs: 300
+  maxEntries: 50000
+  evictionStrategy: lru
+  pathRules:
+    - pathPrefix: /v1/static/
+      ttlSecs: 86400
+    - pathPrefix: /v1/user/
+      bypass: true
+  cacheableMethods:
+    - GET
+    - HEAD
+  cacheableStatuses:
+    - 200
+    - 301
+  respectOriginHeaders: true
+  prefetch:
+    enabled: true
+    minHits: 5
+    lookaheadSecs: 120
+  varyHeaders:
+    - Accept
+    - Accept-Encoding
+  targetRefs:
+    - kind: IntellaroVHost
+      name: api-example

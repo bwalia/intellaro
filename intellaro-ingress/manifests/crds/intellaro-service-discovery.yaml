@@ -1,0 +1,182 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellaroservicediscoveries.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    kind: IntellaroServiceDiscovery
+    plural: intellaroservicediscoveries
+    singular: intellaroservicediscovery
+    shortNames:
+      - isd
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  description: "Discovery mode: kubernetes, endpointSlice, or dns."
+                  enum:
+                    - kubernetes
+                    - endpointSlice
+                    - dns
+                  default: kubernetes
+                namespaces:
+                  type: array
+                  description: Namespaces to discover services in. Empty = same namespace as this CRD.
+                  items:
+                    type: string
+                clusterWide:
+                  type: boolean
+                  description: If true, discover services across all namespaces.
+                  default: false
+                labelSelector:
+                  type: string
+                  description: "Label selector to filter discovered services (e.g., app=nginx)."
+                annotationSelector:
+                  type: string
+                  description: "Annotation selector to filter discovered services."
+                pollIntervalSecs:
+                  type: integer
+                  description: "How frequently to poll for changes (seconds). 0 = event-driven only."
+                  default: 30
+                portDiscovery:
+                  description: "Port discovery strategy."
+                  x-kubernetes-preserve-unknown-fields: true
+                autoRegister:
+                  type: boolean
+                  description: Whether to auto-register discovered services as backend groups.
+                  default: true
+                groupNameTemplate:
+                  type: string
+                  description: "Backend group naming template. Variables: {namespace}, {name}, {port}."
+                  default: "{namespace}-{name}"
+                defaultLbStrategy:
+                  type: string
+                  description: Default load balancing strategy for auto-registered backends.
+                  default: round_robin
+                healthCheck:
+                  type: object
+                  description: Health check configuration for discovered endpoints.
+                  properties:
+                    path:
+                      type: string
+                    intervalSecs:
+                      type: integer
+                      default: 10
+                    timeoutSecs:
+                      type: integer
+                      default: 5
+                    unhealthyThreshold:
+                      type: integer
+                      default: 3
+                  required:
+                    - path
+                excludeServices:
+                  type: array
+                  description: Exclusion rules — services matching these patterns are ignored.
+                  items:
+                    type: object
+                    properties:
+                      namePattern:
+                        type: string
+                        description: "Glob pattern for service name (e.g., kube-*, *.internal)."
+                      namespacePattern:
+                        type: string
+                        description: Namespace pattern.
+                      labelSelector:
+                        type: string
+                        description: "Label selector (e.g., app=nginx)."
+                includeServices:
+                  type: array
+                  description: Inclusion rules — only services matching these patterns are included.
+                  items:
+                    type: object
+                    properties:
+                      namePattern:
+                        type: string
+                      namespacePattern:
+                        type: string
+                      labelSelector:
+                        type: string
+                crossCluster:
+                  type: object
+                  description: Cross-cluster discovery configuration.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    clusters:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - kubeconfigSecret
+                        properties:
+                          name:
+                            type: string
+                          kubeconfigSecret:
+                            type: string
+                          kubeconfigNamespace:
+                            type: string
+                          weight:
+                            type: integer
+                            default: 100
+            status:
+              type: object
+              properties:
+                synced:
+                  type: boolean
+                lastSyncedAt:
+                  type: string
+                discoveredServices:
+                  type: integer
+                discoveredEndpoints:
+                  type: integer
+                registeredGroups:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Services
+          type: integer
+          jsonPath: .status.discoveredServices
+        - name: Endpoints
+          type: integer
+          jsonPath: .status.discoveredEndpoints
+        - name: Synced
+          type: string
+          jsonPath: .status.synced
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

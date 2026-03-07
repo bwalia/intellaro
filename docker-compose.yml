@@ -1,0 +1,115 @@
+# Intellaro — Docker Compose Test Environment
+#
+# Services:
+#   intellaro       → The HTTP server under test           (ports 8080, 9090, 9091)
+#   backend-1       → Nginx origin server #1               (internal only)
+#   backend-2       → Nginx origin server #2               (internal only)
+#   prometheus      → Metrics collection                   (port 9092)
+#   grafana         → Metrics dashboards                   (port 3000)
+#
+# Usage:
+#   docker compose up --build -d        # start everything
+#   curl http://localhost:8080/          # hit intellaro → round-robin to backends
+#   curl http://localhost:9091/api/v1/health -H "x-api-key: intellaro-test-key"
+#   docker compose logs -f intellaro    # watch server logs
+#   docker compose down -v              # tear down
+
+services:
+  # ── Intellaro HTTP Server ──────────────────────────────────────────
+  intellaro:
+    build:
+      context: .
+      dockerfile: intellaro-http-server/Dockerfile
+    container_name: intellaro
+    volumes:
+      - ./docker/config.yaml:/etc/intellaro/config.yaml:ro
+    ports:
+      - "8080:8080"     # HTTP traffic
+      - "9090:9090"     # Prometheus metrics
+      - "9091:9091"     # Management API
+    depends_on:
+      backend-1:
+        condition: service_started
+      backend-2:
+        condition: service_started
+    networks:
+      - intellaro-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --header='X-Api-Key: intellaro-test-key' http://127.0.0.1:9091/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Backend Origin Server 1 ────────────────────────────────────────
+  backend-1:
+    image: nginx:1.27-alpine
+    container_name: backend-1
+    volumes:
+      - ./docker/backend-1.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - intellaro-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Backend Origin Server 2 ────────────────────────────────────────
+  backend-2:
+    image: nginx:1.27-alpine
+    container_name: backend-2
+    volumes:
+      - ./docker/backend-2.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - intellaro-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Prometheus (metrics collection) ────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: intellaro-prometheus
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9092:9090"     # Mapped to 9092 to avoid conflict with intellaro metrics
+    networks:
+      - intellaro-net
+    restart: unless-stopped
+    depends_on:
+      - intellaro
+
+  # ── Grafana (metrics dashboards) ───────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: intellaro-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=intellaro
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - intellaro-net
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+networks:
+  intellaro-net:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

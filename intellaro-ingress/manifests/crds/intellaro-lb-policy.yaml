@@ -1,0 +1,120 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellarolbpolicies.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    kind: IntellaroLBPolicy
+    plural: intellarolbpolicies
+    singular: intellarolbpolicy
+    shortNames:
+      - ilb
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - strategy
+              properties:
+                strategy:
+                  type: string
+                  enum:
+                    - round_robin
+                    - least_connections
+                    - weighted
+                    - random
+                    - consistent_hash
+                healthCheck:
+                  type: object
+                  required:
+                    - path
+                  properties:
+                    path:
+                      type: string
+                    intervalSecs:
+                      type: integer
+                      default: 10
+                    timeoutSecs:
+                      type: integer
+                      default: 5
+                    unhealthyThreshold:
+                      type: integer
+                      default: 3
+                    healthyThreshold:
+                      type: integer
+                      default: 2
+                    expectedStatus:
+                      type: integer
+                stickySession:
+                  type: object
+                  required:
+                    - mode
+                  properties:
+                    mode:
+                      type: string
+                      enum:
+                        - source_ip
+                        - cookie
+                        - header
+                    cookieName:
+                      type: string
+                    cookieTtlSecs:
+                      type: integer
+                    headerName:
+                      type: string
+                failover:
+                  type: object
+                  properties:
+                    customErrorPage:
+                      type: boolean
+                      default: false
+                    fallbackUpstream:
+                      type: string
+                maxConnectionsPerBackend:
+                  type: integer
+                slowStartSecs:
+                  type: integer
+            status:
+              type: object
+              properties:
+                synced:
+                  type: boolean
+                lastSyncedAt:
+                  type: string
+                observedGeneration:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Strategy
+          type: string
+          jsonPath: .spec.strategy
+        - name: Synced
+          type: string
+          jsonPath: .status.synced
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
