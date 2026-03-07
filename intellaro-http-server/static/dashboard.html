@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Intellaro — System Health Dashboard</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --amber: #f59e0b;
+      --amber-dark: #d97706;
+      --amber-light: #fef3c7;
+      --teal: #14b8a6;
+      --teal-dark: #0d9488;
+      --cyan: #06b6d4;
+      --green: #22c55e;
+      --green-dark: #16a34a;
+      --red: #ef4444;
+      --red-dark: #dc2626;
+      --stone-50: #fafaf9;
+      --stone-100: #f5f5f4;
+      --stone-200: #e7e5e4;
+      --stone-300: #d6d3d1;
+      --stone-400: #a8a29e;
+      --stone-500: #78716c;
+      --stone-700: #44403c;
+      --stone-800: #292524;
+      --stone-900: #1c1917;
+      --stone-950: #0c0a09;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      color: var(--stone-800);
+      line-height: 1.6;
+      background: var(--stone-100);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Nav */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(12,10,9,0.92);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.875rem 1.5rem;
+    }
+    .logo {
+      font-size: 1.25rem; font-weight: 700; color: #fff;
+      text-decoration: none; display: flex; align-items: center; gap: 0.5rem;
+    }
+    .logo-mark {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--amber) 0%, var(--teal) 100%);
+      display: grid; place-items: center;
+      font-weight: 800; font-size: 0.875rem; color: #fff;
+    }
+    .nav-links { display: flex; gap: 0.25rem; align-items: center; }
+    .nav-links a {
+      color: rgba(255,255,255,0.7); text-decoration: none;
+      padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.875rem; font-weight: 500;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: #fff; }
+    .nav-links .active { color: var(--amber); }
+
+    /* Header */
+    .page-header {
+      background: var(--stone-950); padding: 6rem 1.5rem 2.5rem; position: relative; overflow: hidden;
+    }
+    .page-header::before {
+      content: ''; position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 0%, rgba(245,158,11,0.10) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 80%, rgba(20,184,166,0.06) 0%, transparent 50%);
+    }
+    .header-inner {
+      position: relative; max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
+    }
+    .header-inner h1 { font-size: 1.75rem; font-weight: 800; color: #fff; }
+    .header-inner h1 .gradient {
+      background: linear-gradient(135deg, var(--amber) 0%, var(--teal) 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .header-meta { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .refresh-controls { display: flex; align-items: center; gap: 0.75rem; }
+    .refresh-controls label { color: var(--stone-400); font-size: 0.8125rem; cursor: pointer; display: flex; align-items: center; gap: 0.375rem; }
+    .refresh-controls input[type="checkbox"] { accent-color: var(--amber); }
+    .btn-refresh {
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+      color: #fff; padding: 0.375rem 0.875rem; border-radius: 6px;
+      font-size: 0.8125rem; font-weight: 500; cursor: pointer; transition: background 0.2s;
+    }
+    .btn-refresh:hover { background: rgba(255,255,255,0.14); }
+    .last-updated { color: var(--stone-500); font-size: 0.75rem; }
+
+    /* Main content */
+    .main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+
+    /* API key prompt */
+    .auth-prompt {
+      background: #fff; border: 1px solid var(--stone-200); border-radius: 12px;
+      padding: 2rem; text-align: center; margin-bottom: 1.5rem;
+    }
+    .auth-prompt h2 { font-size: 1.125rem; margin-bottom: 0.75rem; }
+    .auth-prompt p { color: var(--stone-500); font-size: 0.875rem; margin-bottom: 1rem; }
+    .auth-input-row { display: flex; gap: 0.5rem; justify-content: center; max-width: 400px; margin: 0 auto; }
+    .auth-input-row input {
+      flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--stone-300);
+      border-radius: 6px; font-size: 0.875rem;
+    }
+    .auth-input-row button {
+      background: var(--amber); color: #fff; border: none; padding: 0.5rem 1.25rem;
+      border-radius: 6px; font-weight: 600; font-size: 0.875rem; cursor: pointer;
+    }
+
+    /* Error banner */
+    .error-banner {
+      background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2);
+      border-radius: 10px; padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+      color: var(--red-dark); font-size: 0.875rem; display: none;
+    }
+
+    /* Summary cards */
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem; margin-bottom: 1.5rem;
+    }
+    .summary-card {
+      background: #fff; border-radius: 12px; padding: 1.5rem;
+      border: 1px solid var(--stone-200);
+    }
+    .summary-card .label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--stone-500); margin-bottom: 0.5rem; }
+    .summary-card .value { font-size: 1.75rem; font-weight: 800; }
+    .summary-card .sub { font-size: 0.75rem; color: var(--stone-400); margin-top: 0.25rem; }
+    .health-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.375rem; vertical-align: middle; }
+    .dot-green { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.4); }
+    .dot-amber { background: var(--amber); box-shadow: 0 0 6px rgba(245,158,11,0.4); }
+    .dot-red { background: var(--red); box-shadow: 0 0 6px rgba(239,68,68,0.4); }
+    .dot-gray { background: var(--stone-400); }
+    .v-green { color: var(--green-dark); }
+    .v-amber { color: var(--amber-dark); }
+    .v-red { color: var(--red-dark); }
+    .v-teal { color: var(--teal-dark); }
+    .v-cyan { color: var(--cyan); }
+
+    /* Section */
+    .section { margin-bottom: 1.5rem; }
+    .section-label {
+      font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--amber); margin-bottom: 0.75rem;
+    }
+
+    /* Services grid */
+    .services-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 0.75rem;
+    }
+    .service-card {
+      background: #fff; border-radius: 10px; padding: 1.25rem;
+      border: 1px solid var(--stone-200); display: flex; align-items: flex-start; gap: 0.75rem;
+      transition: border-color 0.2s;
+    }
+    .service-card:hover { border-color: var(--stone-300); }
+    .service-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 0.375rem; flex-shrink: 0; }
+    .service-info { flex: 1; min-width: 0; }
+    .service-name { font-size: 0.9375rem; font-weight: 700; word-break: break-all; }
+    .service-meta { font-size: 0.75rem; color: var(--stone-500); margin-top: 0.25rem; }
+    .service-badge {
+      display: inline-block; font-size: 0.625rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; padding: 0.125rem 0.5rem; border-radius: 999px; margin-top: 0.375rem;
+    }
+    .badge-backend { background: rgba(20,184,166,0.1); color: var(--teal-dark); }
+    .badge-infra { background: rgba(139,92,246,0.1); color: #7c3aed; }
+    .badge-status {
+      display: inline-block; font-size: 0.625rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; padding: 0.125rem 0.5rem; border-radius: 999px; margin-left: 0.375rem;
+    }
+    .badge-healthy { background: rgba(34,197,94,0.1); color: var(--green-dark); }
+    .badge-degraded { background: rgba(245,158,11,0.1); color: var(--amber-dark); }
+    .badge-unhealthy { background: rgba(239,68,68,0.1); color: var(--red-dark); }
+    .badge-unreachable { background: rgba(168,162,158,0.15); color: var(--stone-500); }
+
+    /* Info grid */
+    .info-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+    }
+    .info-card {
+      background: #fff; border-radius: 12px; padding: 1.5rem;
+      border: 1px solid var(--stone-200);
+    }
+    .info-card h3 { font-size: 0.9375rem; font-weight: 700; margin-bottom: 1rem; }
+    .info-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.5rem 0; border-bottom: 1px solid var(--stone-100);
+    }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { font-size: 0.8125rem; color: var(--stone-500); }
+    .info-value { font-size: 0.8125rem; font-weight: 600; text-align: right; word-break: break-all; }
+
+    /* Port table */
+    .port-table { width: 100%; border-collapse: collapse; }
+    .port-table th {
+      font-size: 0.6875rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--stone-500); text-align: left;
+      padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--stone-200);
+    }
+    .port-table td {
+      font-size: 0.8125rem; padding: 0.625rem 0.75rem;
+      border-bottom: 1px solid var(--stone-100);
+    }
+    .port-table tr:last-child td { border-bottom: none; }
+
+    /* Disk cards */
+    .disk-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 0.75rem;
+    }
+    .disk-card {
+      background: #fff; border-radius: 10px; padding: 1.25rem;
+      border: 1px solid var(--stone-200);
+    }
+    .disk-mount { font-size: 0.9375rem; font-weight: 700; margin-bottom: 0.125rem; }
+    .disk-fs { font-size: 0.75rem; color: var(--stone-400); margin-bottom: 0.75rem; }
+    .disk-bar-track {
+      height: 8px; background: var(--stone-200); border-radius: 4px; overflow: hidden;
+      margin-bottom: 0.5rem;
+    }
+    .disk-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+    .disk-bar-green { background: var(--green); }
+    .disk-bar-amber { background: var(--amber); }
+    .disk-bar-red { background: var(--red); }
+    .disk-stats { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--stone-500); }
+
+    /* Config cards */
+    .config-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+    }
+
+    /* Progress arc (simple bar for CPU/Memory) */
+    .usage-bar-track {
+      height: 6px; background: var(--stone-200); border-radius: 3px;
+      overflow: hidden; margin-top: 0.75rem;
+    }
+    .usage-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+
+    /* Loading skeleton */
+    .skeleton {
+      background: linear-gradient(90deg, var(--stone-200) 25%, var(--stone-100) 50%, var(--stone-200) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* Footer */
+    footer {
+      background: var(--stone-950);
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding: 1.5rem;
+      margin-top: 2rem;
+    }
+    .footer-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 1rem;
+    }
+    .footer-inner span { font-size: 0.8125rem; color: var(--stone-500); }
+    .footer-inner a { font-size: 0.8125rem; color: var(--stone-500); text-decoration: none; }
+    .footer-inner a:hover { color: var(--stone-400); }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .summary-grid { grid-template-columns: repeat(2, 1fr); }
+      .services-grid, .disk-grid { grid-template-columns: 1fr; }
+      .info-grid { grid-template-columns: 1fr; }
+      .header-inner { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="nav-inner">
+      <a href="/" class="logo" target="_blank">
+        <div class="logo-mark">I</div>
+        Intellaro
+      </a>
+      <div class="nav-links">
+        <a href="/dashboard" class="active">Dashboard</a>
+        <a href="/api/v1/openapi.json" target="_blank">API</a>
+        <a href="https://github.com/bwalia/intellaro" target="_blank">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Header -->
+  <div class="page-header">
+    <div class="header-inner">
+      <div>
+        <h1>System <span class="gradient">Health Dashboard</span></h1>
+      </div>
+      <div class="header-meta">
+        <div class="refresh-controls">
+          <label><input type="checkbox" id="autoRefresh" checked /> Auto-refresh</label>
+          <button class="btn-refresh" onclick="refreshDashboard()">Refresh Now</button>
+        </div>
+        <span class="last-updated" id="lastUpdated"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Auth prompt (hidden by default) -->
+    <div class="auth-prompt" id="authPrompt" style="display:none;">
+      <h2>API Key Required</h2>
+      <p>The management API requires authentication. Enter your API key to continue.</p>
+      <div class="auth-input-row">
+        <input type="password" id="apiKeyInput" placeholder="Enter API key..." />
+        <button onclick="setApiKey()">Connect</button>
+      </div>
+    </div>
+
+    <!-- Error banner -->
+    <div class="error-banner" id="errorBanner"></div>
+
+    <!-- Summary cards -->
+    <div class="summary-grid" id="summaryGrid">
+      <div class="summary-card">
+        <div class="label">Overall Health</div>
+        <div class="value" id="overallHealth"><span class="skeleton" style="display:inline-block;width:120px;height:28px;"></span></div>
+      </div>
+      <div class="summary-card">
+        <div class="label">Server Uptime</div>
+        <div class="value v-teal" id="uptime"><span class="skeleton" style="display:inline-block;width:100px;height:28px;"></span></div>
+        <div class="sub" id="version"></div>
+      </div>
+      <div class="summary-card">
+        <div class="label">CPU Usage</div>
+        <div class="value v-cyan" id="cpuUsage"><span class="skeleton" style="display:inline-block;width:80px;height:28px;"></span></div>
+        <div class="sub" id="cpuInfo"></div>
+        <div class="usage-bar-track"><div class="usage-bar-fill" id="cpuBar" style="width:0%;background:var(--cyan);"></div></div>
+      </div>
+      <div class="summary-card">
+        <div class="label">Memory Usage</div>
+        <div class="value v-amber" id="memUsage"><span class="skeleton" style="display:inline-block;width:80px;height:28px;"></span></div>
+        <div class="sub" id="memInfo"></div>
+        <div class="usage-bar-track"><div class="usage-bar-fill" id="memBar" style="width:0%;background:var(--amber);"></div></div>
+      </div>
+    </div>
+
+    <!-- Services -->
+    <div class="section">
+      <div class="section-label">Services</div>
+      <div class="services-grid" id="servicesGrid">
+        <div class="service-card"><div class="skeleton" style="width:100%;height:60px;"></div></div>
+        <div class="service-card"><div class="skeleton" style="width:100%;height:60px;"></div></div>
+        <div class="service-card"><div class="skeleton" style="width:100%;height:60px;"></div></div>
+      </div>
+    </div>
+
+    <!-- System info + Port bindings -->
+    <div class="section">
+      <div class="section-label">System Information</div>
+      <div class="info-grid">
+        <div class="info-card" id="sysInfoCard">
+          <h3>Server</h3>
+          <div class="info-row"><span class="info-label">Hostname</span><span class="info-value" id="hostname">--</span></div>
+          <div class="info-row"><span class="info-label">IP Address</span><span class="info-value" id="ipAddress">--</span></div>
+          <div class="info-row"><span class="info-label">Operating System</span><span class="info-value" id="osInfo">--</span></div>
+          <div class="info-row"><span class="info-label">Kernel</span><span class="info-value" id="kernelInfo">--</span></div>
+          <div class="info-row"><span class="info-label">CPU</span><span class="info-value" id="cpuBrand">--</span></div>
+          <div class="info-row"><span class="info-label">CPU Cores</span><span class="info-value" id="cpuCores">--</span></div>
+        </div>
+        <div class="info-card">
+          <h3>Port Bindings</h3>
+          <table class="port-table">
+            <thead><tr><th>Address</th><th>Protocol</th><th>TLS</th></tr></thead>
+            <tbody id="portTableBody">
+              <tr><td colspan="3" style="text-align:center;color:var(--stone-400);">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Disk space -->
+    <div class="section">
+      <div class="section-label">Disk Space</div>
+      <div class="disk-grid" id="diskGrid">
+        <div class="disk-card"><div class="skeleton" style="width:100%;height:80px;"></div></div>
+      </div>
+    </div>
+
+    <!-- Configuration -->
+    <div class="section">
+      <div class="section-label">Configuration</div>
+      <div class="config-grid">
+        <div class="info-card">
+          <h3>Cache</h3>
+          <div class="info-row"><span class="info-label">Enabled</span><span class="info-value" id="cacheEnabled">--</span></div>
+          <div class="info-row"><span class="info-label">Max Entries</span><span class="info-value" id="cacheMaxEntries">--</span></div>
+          <div class="info-row"><span class="info-label">Default TTL</span><span class="info-value" id="cacheTtl">--</span></div>
+          <div class="info-row"><span class="info-label">Cache POST</span><span class="info-value" id="cachePost">--</span></div>
+        </div>
+        <div class="info-card">
+          <h3>Rate Limiting</h3>
+          <div class="info-row"><span class="info-label">Max Requests</span><span class="info-value" id="rlMax">--</span></div>
+          <div class="info-row"><span class="info-label">Window</span><span class="info-value" id="rlWindow">--</span></div>
+        </div>
+        <div class="info-card">
+          <h3>Workers</h3>
+          <div class="info-row"><span class="info-label">Worker Count</span><span class="info-value" id="workerCount">--</span></div>
+          <div class="info-row"><span class="info-label">Listeners</span><span class="info-value" id="listenerCount">--</span></div>
+          <div class="info-row"><span class="info-label">Upstreams</span><span class="info-value" id="upstreamCount">--</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-inner">
+      <span>Intellaro Health Dashboard</span>
+      <a href="https://github.com/bwalia/intellaro" target="_blank">GitHub</a>
+    </div>
+  </footer>
+
+  <script>
+    // ── Configuration ──────────────────────────────────────
+    const REFRESH_INTERVAL = 5000;
+    let apiKey = '';
+    let refreshTimer = null;
+    let isFirstLoad = true;
+
+    // Read API key from URL param
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('key')) {
+      apiKey = params.get('key');
+    } else if (sessionStorage.getItem('intellaro_api_key')) {
+      apiKey = sessionStorage.getItem('intellaro_api_key');
+    }
+
+    // ── API helpers ────────────────────────────────────────
+    async function fetchWithAuth(url) {
+      const headers = {};
+      if (apiKey) headers['X-Api-Key'] = apiKey;
+      const resp = await fetch(url, { headers });
+      if (resp.status === 401) throw new Error('AUTH_REQUIRED');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.json();
+    }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    }
+
+    function formatUptime(secs) {
+      const d = Math.floor(secs / 86400);
+      const h = Math.floor((secs % 86400) / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+      if (h > 0) return h + 'h ' + m + 'm';
+      return m + 'm ' + (secs % 60) + 's';
+    }
+
+    function statusDotClass(status) {
+      if (status === 'healthy') return 'dot-green';
+      if (status === 'degraded') return 'dot-amber';
+      if (status === 'unhealthy') return 'dot-red';
+      return 'dot-gray';
+    }
+
+    function statusBadgeClass(status) {
+      if (status === 'healthy') return 'badge-healthy';
+      if (status === 'degraded') return 'badge-degraded';
+      if (status === 'unhealthy') return 'badge-unhealthy';
+      return 'badge-unreachable';
+    }
+
+    function barColorClass(pct) {
+      if (pct < 70) return 'disk-bar-green';
+      if (pct < 90) return 'disk-bar-amber';
+      return 'disk-bar-red';
+    }
+
+    // ── Render functions ───────────────────────────────────
+    function renderSystem(data) {
+      document.getElementById('hostname').textContent = data.hostname;
+      document.getElementById('ipAddress').textContent = data.ip_address;
+      document.getElementById('osInfo').textContent = data.os;
+      document.getElementById('kernelInfo').textContent = data.kernel;
+      document.getElementById('cpuBrand').textContent = data.cpu.brand || 'N/A';
+      document.getElementById('cpuCores').textContent = data.cpu.count;
+      document.getElementById('uptime').textContent = formatUptime(data.uptime_secs);
+
+      // CPU
+      const cpuPct = data.cpu.usage_percent.toFixed(1);
+      document.getElementById('cpuUsage').textContent = cpuPct + '%';
+      document.getElementById('cpuInfo').textContent = data.cpu.count + ' cores';
+      document.getElementById('cpuBar').style.width = Math.min(cpuPct, 100) + '%';
+
+      // Memory
+      const memTotal = data.memory.total_bytes;
+      const memUsed = data.memory.used_bytes;
+      const memPct = memTotal > 0 ? ((memUsed / memTotal) * 100).toFixed(1) : 0;
+      document.getElementById('memUsage').textContent = memPct + '%';
+      document.getElementById('memInfo').textContent = formatBytes(memUsed) + ' / ' + formatBytes(memTotal);
+      document.getElementById('memBar').style.width = Math.min(memPct, 100) + '%';
+
+      // Port bindings
+      const tbody = document.getElementById('portTableBody');
+      if (data.listeners && data.listeners.length > 0) {
+        tbody.innerHTML = data.listeners.map(function(l) {
+          return '<tr><td><strong>' + l.address + '</strong></td><td>' + l.protocol + '</td><td>' + (l.tls ? 'Yes' : 'No') + '</td></tr>';
+        }).join('');
+      }
+
+      // Disks
+      const diskGrid = document.getElementById('diskGrid');
+      if (data.disks && data.disks.length > 0) {
+        diskGrid.innerHTML = data.disks.map(function(d) {
+          const usedPct = d.total_bytes > 0 ? ((d.used_bytes / d.total_bytes) * 100) : 0;
+          const colorClass = barColorClass(usedPct);
+          return '<div class="disk-card">' +
+            '<div class="disk-mount">' + d.mount_point + '</div>' +
+            '<div class="disk-fs">' + d.filesystem + '</div>' +
+            '<div class="disk-bar-track"><div class="disk-bar-fill ' + colorClass + '" style="width:' + usedPct.toFixed(1) + '%"></div></div>' +
+            '<div class="disk-stats"><span>' + formatBytes(d.used_bytes) + ' used</span><span>' + formatBytes(d.available_bytes) + ' free</span><span>' + formatBytes(d.total_bytes) + ' total</span></div>' +
+            '</div>';
+        }).join('');
+      }
+    }
+
+    function renderStatus(data) {
+      document.getElementById('version').textContent = 'v' + data.version;
+
+      // Cache config
+      if (data.cache) {
+        document.getElementById('cacheEnabled').innerHTML = data.cache.enabled
+          ? '<span style="color:var(--green-dark)">Enabled</span>'
+          : '<span style="color:var(--stone-400)">Disabled</span>';
+        document.getElementById('cacheMaxEntries').textContent = data.cache.max_entries.toLocaleString();
+        document.getElementById('cacheTtl').textContent = data.cache.default_ttl_secs + 's';
+        document.getElementById('cachePost').textContent = data.cache.cache_post ? 'Yes' : 'No';
+      }
+
+      // Rate limit
+      if (data.rate_limit) {
+        document.getElementById('rlMax').textContent = data.rate_limit.max_requests.toLocaleString();
+        document.getElementById('rlWindow').textContent = data.rate_limit.window_secs + 's';
+      } else {
+        document.getElementById('rlMax').textContent = 'Disabled';
+        document.getElementById('rlWindow').textContent = '--';
+      }
+
+      // Workers
+      document.getElementById('workerCount').textContent = data.worker_count;
+      document.getElementById('listenerCount').textContent = data.listeners;
+      document.getElementById('upstreamCount').textContent = data.upstreams;
+    }
+
+    function renderServices(services) {
+      const grid = document.getElementById('servicesGrid');
+      if (!services || services.length === 0) {
+        grid.innerHTML = '<div style="color:var(--stone-400);padding:1rem;">No services configured.</div>';
+        return;
+      }
+
+      grid.innerHTML = services.map(function(s) {
+        const dotClass = statusDotClass(s.status);
+        const badgeType = s.type === 'backend' ? 'badge-backend' : 'badge-infra';
+        const badgeLabel = s.type === 'backend' ? 'Backend' : 'Infrastructure';
+        const statusBadge = statusBadgeClass(s.status);
+        return '<div class="service-card">' +
+          '<div class="service-dot ' + dotClass + '"></div>' +
+          '<div class="service-info">' +
+            '<div class="service-name">' + s.name + '</div>' +
+            '<div class="service-meta">' + s.address + '</div>' +
+            '<span class="service-badge ' + badgeType + '">' + badgeLabel + '</span>' +
+            '<span class="badge-status ' + statusBadge + '">' + s.status + '</span>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      // Overall health
+      const el = document.getElementById('overallHealth');
+      const allHealthy = services.every(function(s) { return s.status === 'healthy'; });
+      const anyUnhealthy = services.some(function(s) { return s.status === 'unhealthy'; });
+      if (allHealthy) {
+        el.innerHTML = '<span class="health-dot dot-green"></span><span class="v-green">Healthy</span>';
+      } else if (anyUnhealthy) {
+        el.innerHTML = '<span class="health-dot dot-red"></span><span class="v-red">Unhealthy</span>';
+      } else {
+        el.innerHTML = '<span class="health-dot dot-amber"></span><span class="v-amber">Degraded</span>';
+      }
+    }
+
+    function updateTimestamp() {
+      const now = new Date();
+      document.getElementById('lastUpdated').textContent = 'Last updated: ' + now.toLocaleTimeString();
+    }
+
+    function showError(msg) {
+      const banner = document.getElementById('errorBanner');
+      banner.textContent = 'Error: ' + msg;
+      banner.style.display = 'block';
+      setTimeout(function() { banner.style.display = 'none'; }, 8000);
+    }
+
+    // ── Auth ───────────────────────────────────────────────
+    function setApiKey() {
+      apiKey = document.getElementById('apiKeyInput').value;
+      if (apiKey) {
+        sessionStorage.setItem('intellaro_api_key', apiKey);
+        document.getElementById('authPrompt').style.display = 'none';
+        refreshDashboard();
+      }
+    }
+
+    document.getElementById('apiKeyInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') setApiKey();
+    });
+
+    // ── Main refresh ───────────────────────────────────────
+    async function refreshDashboard() {
+      try {
+        const [health, status, system, services] = await Promise.all([
+          fetchWithAuth('/api/v1/health'),
+          fetchWithAuth('/api/v1/status'),
+          fetchWithAuth('/api/v1/system'),
+          fetchWithAuth('/api/v1/services'),
+        ]);
+        renderSystem(system.data);
+        renderStatus(status.data);
+        renderServices(services.data);
+        updateTimestamp();
+        isFirstLoad = false;
+      } catch (err) {
+        if (err.message === 'AUTH_REQUIRED') {
+          document.getElementById('authPrompt').style.display = 'block';
+          stopAutoRefresh();
+          return;
+        }
+        if (isFirstLoad) {
+          showError('Could not connect to management API. ' + err.message);
+        } else {
+          showError(err.message);
+        }
+      }
+    }
+
+    // ── Auto-refresh ───────────────────────────────────────
+    function startAutoRefresh() {
+      if (refreshTimer) return;
+      refreshTimer = setInterval(refreshDashboard, REFRESH_INTERVAL);
+    }
+
+    function stopAutoRefresh() {
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    }
+
+    document.getElementById('autoRefresh').addEventListener('change', function() {
+      if (this.checked) { startAutoRefresh(); } else { stopAutoRefresh(); }
+    });
+
+    // ── Init ───────────────────────────────────────────────
+    refreshDashboard();
+    startAutoRefresh();
+  </script>
+
+</body>
+</html>

@@ -65,6 +65,9 @@ jsonwebtoken = "9"
 # Error handling
 thiserror = "2"
 
+# System information (CPU, memory, disk, hostname)
+sysinfo = "0.33"
+
 # Intelligent routing engine (in-process library)
 intellaro-http-router = { path = "../intellaro-http-router" }
 
