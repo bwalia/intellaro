@@ -8,9 +8,9 @@
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────
-SERVER="http://localhost:8080"       # Proxy endpoint
-MCP="http://localhost:9091"          # MCP management API
-METRICS="http://localhost:9090"      # Prometheus metrics
+SERVER="http://localhost:18080"      # Proxy endpoint
+MCP="http://localhost:19091"         # MCP management API
+METRICS="http://localhost:19090"     # Prometheus metrics
 API_KEY="test-api-key-12345"
 
 PASS=0
