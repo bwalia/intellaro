@@ -1,0 +1,44 @@
+# Integration test configuration for intellaro-http-server.
+# Proxies to 3 nginx backend containers via round-robin.
+
+listeners:
+  - address: "0.0.0.0:8080"
+    protocol: auto
+
+upstreams:
+  - name: test-upstream
+    load_balancing: round_robin
+    servers:
+      - address: "backend1:80"
+        weight: 1
+      - address: "backend2:80"
+        weight: 1
+      - address: "backend3:80"
+        weight: 1
+    health_check:
+      path: /healthz
+      interval_secs: 5
+      unhealthy_threshold: 3
+
+cache:
+  enabled: true
+  max_entries: 1000
+  default_ttl_secs: 60
+  cache_post: false
+
+security:
+  ip_allow: []
+  ip_block:
+    - "192.0.2.0/24"
+  rate_limit:
+    max_requests: 10
+    window_secs: 5
+
+logging:
+  level: debug
+  format: json
+  metrics_path: /metrics
+
+management_api:
+  address: "0.0.0.0:9091"
+  api_key: "test-api-key-12345"

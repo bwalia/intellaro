@@ -1,0 +1,60 @@
+# ── CI/Integration Test Dockerfile ──────────────────────────────────
+# Built from the intellaro/ parent directory as context so that
+# sibling crates (intellaro-http-router) are available.
+#
+# Usage:
+#   docker build -f intellaro-http-server/Dockerfile.ci -t intellaro-http-server:test .
+#   (run from the intellaro/ root directory)
+
+# ── Stage 1: Build ────────────────────────────────────────────────────
+FROM rust:1.88-bookworm AS builder
+
+# Install build dependencies for aws-lc-sys (used by rustls)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    clang \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the router library crate first (dependency of the server)
+COPY intellaro-http-router/Cargo.toml intellaro-http-router/Cargo.toml
+COPY intellaro-http-router/src/ intellaro-http-router/src/
+
+# Copy server manifests for dependency caching
+COPY intellaro-http-server/Cargo.toml intellaro-http-server/Cargo.toml
+COPY intellaro-http-server/Cargo.lock intellaro-http-server/Cargo.lock
+
+# Create a placeholder main to cache dependency compilation
+RUN mkdir -p intellaro-http-server/src && \
+    echo 'fn main() { println!("placeholder"); }' > intellaro-http-server/src/main.rs && \
+    cd intellaro-http-server && cargo build --release 2>/dev/null || true && \
+    rm -rf src
+
+# Copy real server source and build
+COPY intellaro-http-server/src/ intellaro-http-server/src/
+RUN cd intellaro-http-server && touch src/main.rs && cargo build --release
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system intellaro && \
+    useradd --system --gid intellaro --create-home intellaro
+
+COPY --from=builder /build/intellaro-http-server/target/release/intellaro-http-server /usr/local/bin/intellaro-http-server
+
+RUN chmod +x /usr/local/bin/intellaro-http-server
+
+USER intellaro
+WORKDIR /home/intellaro
+
+EXPOSE 8080 8443 9090 9091 7946/udp
+
+ENTRYPOINT ["intellaro-http-server"]
+CMD ["--config", "/etc/intellaro/config.yaml"]

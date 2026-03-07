@@ -1,0 +1,65 @@
+# Orchestrates intellaro-http-server with 3 mock backends for integration testing.
+# The server proxies to the backends via round-robin load balancing.
+
+services:
+  # ── Mock backends (lightweight nginx returning identifying responses) ──
+  backend1:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./backend-conf/backend1.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./backend-conf/backend1.html:/usr/share/nginx/html/index.html:ro
+      - ./backend-conf/healthz.html:/usr/share/nginx/html/healthz:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  backend2:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./backend-conf/backend2.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./backend-conf/backend2.html:/usr/share/nginx/html/index.html:ro
+      - ./backend-conf/healthz.html:/usr/share/nginx/html/healthz:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  backend3:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./backend-conf/backend3.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./backend-conf/backend3.html:/usr/share/nginx/html/index.html:ro
+      - ./backend-conf/healthz.html:/usr/share/nginx/html/healthz:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  # ── Intellaro HTTP Server ──────────────────────────────────────────────
+  intellaro-server:
+    build:
+      context: ../../../
+      dockerfile: intellaro-http-server/Dockerfile.ci
+    volumes:
+      - ./config.yaml:/etc/intellaro/config.yaml:ro
+    ports:
+      - "8080:8080"    # Proxy
+      - "9090:9090"    # Metrics
+      - "9091:9091"    # MCP API
+    depends_on:
+      backend1:
+        condition: service_healthy
+      backend2:
+        condition: service_healthy
+      backend3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --header='X-Api-Key: test-api-key-12345' http://127.0.0.1:9091/api/v1/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
