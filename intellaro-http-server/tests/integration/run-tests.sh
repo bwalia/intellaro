@@ -234,7 +234,7 @@ assert_status "Proxy request to / returns 200" \
 
 # 2.2 Round-robin distributes across multiple backends
 # Wait for rate limit window to reset (MCP tests above may have consumed tokens)
-sleep 6
+sleep 11
 echo "  Testing round-robin load balancing (multiple successful proxied requests)..."
 success_count=0
 for i in $(seq 1 9); do
@@ -253,7 +253,7 @@ else
 fi
 
 # Wait for rate limit window to reset after round-robin test
-sleep 6
+sleep 11
 
 # 2.3 Proxy preserves path
 assert_body_contains "Proxy passes /api/data path through" \
@@ -269,13 +269,13 @@ assert_header_contains "Proxy preserves Content-Type from backend" \
 section "3. Security Policies"
 # ─────────────────────────────────────────────────────────────────────
 
-# 3.1 Rate limiting — send more than max_requests (10) within window (5s)
-echo "  Testing rate limiting (max 10 requests in 5s window)..."
-# First, send some requests to warm up and get close to limit
-for i in $(seq 1 11); do
+# 3.1 Rate limiting — send more than max_requests (50) within window (10s)
+echo "  Testing rate limiting (max 50 requests in 10s window)..."
+# First, send requests to exceed the limit
+for i in $(seq 1 51); do
     curl -s -o /dev/null -H "Host: test-upstream" "${SERVER}/rate-limit-test-$$" || true
 done
-# The 12th request should be rate-limited
+# The next request should be rate-limited
 rate_status=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: test-upstream" "${SERVER}/rate-limit-test-$$") || true
 if [ "$rate_status" = "429" ]; then
     pass "Rate limiter returns 429 after exceeding max_requests"
@@ -296,9 +296,9 @@ fi
 
 # 3.2 Rate limit response includes Retry-After header
 # Wait for rate limit window to reset first
-sleep 6
+sleep 11
 # Burn through tokens again
-for i in $(seq 1 12); do
+for i in $(seq 1 52); do
     curl -s -o /dev/null -H "Host: test-upstream" "${SERVER}/retry-after-test-$$" || true
 done
 retry_headers=$(curl -sI -H "Host: test-upstream" "${SERVER}/retry-after-test-$$") || true
@@ -319,7 +319,7 @@ section "4. Caching"
 # ─────────────────────────────────────────────────────────────────────
 
 # Wait for rate limit window to expire so caching tests pass
-sleep 6
+sleep 11
 
 # Use a unique path per test run to guarantee a cold cache
 CACHE_TEST_PATH="/cache-test-$$"
@@ -418,7 +418,7 @@ assert_status "Config GET works after reload" \
 # 7.3 Server still proxies after reload
 sleep 1
 # Wait for rate limit to reset
-sleep 6
+sleep 11
 assert_status "Proxy still works after config reload" \
     "200" \
     -H "Host: test-upstream" "${SERVER}/"
@@ -428,7 +428,7 @@ section "8. Static File Serving"
 # ─────────────────────────────────────────────────────────────────────
 
 # Wait for rate limit window to reset
-sleep 6
+sleep 11
 
 # 8.1 /index.html returns 200
 assert_status "GET /index.html returns 200" \

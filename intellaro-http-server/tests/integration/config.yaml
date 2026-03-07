@@ -31,8 +31,8 @@ security:
   ip_block:
     - "192.0.2.0/24"
   rate_limit:
-    max_requests: 10
-    window_secs: 5
+    max_requests: 50
+    window_secs: 10
 
 static_roots:
   - url_prefix: "/"

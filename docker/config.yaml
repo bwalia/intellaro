@@ -41,7 +41,7 @@ cache:
 
 security:
   rate_limit:
-    max_requests: 100
+    max_requests: 500
     window_secs: 60
 
 static_roots:
