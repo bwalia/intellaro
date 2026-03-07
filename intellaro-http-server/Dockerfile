@@ -48,6 +48,7 @@ RUN groupadd --system intellaro && \
     useradd --system --gid intellaro --create-home intellaro
 
 COPY --from=builder /build/intellaro-http-server/target/release/intellaro-http-server /usr/local/bin/intellaro-http-server
+COPY intellaro-http-server/static/ /usr/local/share/intellaro/static/
 
 RUN chmod +x /usr/local/bin/intellaro-http-server
 
