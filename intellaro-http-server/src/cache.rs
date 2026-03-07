@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response};
 use tracing::{debug, info};
@@ -142,7 +143,13 @@ impl CacheLayer {
             .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
             .collect();
 
-        let body = resp.body().frame_ref_bytes().unwrap_or_default().to_vec();
+        let body = resp
+            .body()
+            .clone()
+            .collect()
+            .await
+            .map(|collected| collected.to_bytes().to_vec())
+            .unwrap_or_default();
 
         let entry = CachedEntry {
             status: resp.status().as_u16(),
@@ -231,19 +238,6 @@ impl CacheLayer {
         }
 
         Duration::from_secs(self.config.default_ttl_secs)
-    }
-}
-
-/// Trait extension to read body bytes from a Full<Bytes> body without consuming it.
-trait FullBodyExt {
-    fn frame_ref_bytes(&self) -> Option<&[u8]>;
-}
-
-impl FullBodyExt for BoxBody {
-    fn frame_ref_bytes(&self) -> Option<&[u8]> {
-        // For http_body_util::Full<Bytes>, we can inspect the inner data.
-        // This is a simplification; in production, we'd buffer the body stream.
-        None
     }
 }
 
