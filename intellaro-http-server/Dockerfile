@@ -32,8 +32,9 @@ RUN mkdir -p intellaro-http-server/src && \
     cd intellaro-http-server && cargo build --release 2>/dev/null || true && \
     rm -rf src
 
-# Copy real server source and build
+# Copy real server source and static assets, then build
 COPY intellaro-http-server/src/ intellaro-http-server/src/
+COPY intellaro-http-server/static/ intellaro-http-server/static/
 RUN cd intellaro-http-server && touch src/main.rs && cargo build --release
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
