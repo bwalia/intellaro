@@ -1,16 +1,16 @@
 # Intellaro — Docker Compose Test Environment
 #
 # Services:
-#   intellaro       → The HTTP server under test           (ports 8080, 9090, 9091)
+#   intellaro       → The HTTP server under test           (ports 18080, 19090, 19091)
 #   backend-1       → Nginx origin server #1               (internal only)
 #   backend-2       → Nginx origin server #2               (internal only)
-#   prometheus      → Metrics collection                   (port 9092)
-#   grafana         → Metrics dashboards                   (port 3000)
+#   prometheus      → Metrics collection                   (port 19092)
+#   grafana         → Metrics dashboards                   (port 13000)
 #
 # Usage:
 #   docker compose up --build -d        # start everything
-#   curl http://localhost:8080/          # hit intellaro → round-robin to backends
-#   curl http://localhost:9091/api/v1/health -H "x-api-key: intellaro-test-key"
+#   curl http://localhost:18080/          # hit intellaro → round-robin to backends
+#   curl http://localhost:19091/api/v1/health -H "x-api-key: intellaro-test-key"
 #   docker compose logs -f intellaro    # watch server logs
 #   docker compose down -v              # tear down
 
@@ -24,9 +24,9 @@ services:
     volumes:
       - ./docker/config.yaml:/etc/intellaro/config.yaml:ro
     ports:
-      - "8080:8080"     # HTTP traffic
-      - "9090:9090"     # Prometheus metrics
-      - "9091:9091"     # Management API
+      - "18080:8080"    # HTTP traffic
+      - "19090:9090"    # Prometheus metrics
+      - "19091:9091"    # Management API
     depends_on:
       backend-1:
         condition: service_started
@@ -80,7 +80,7 @@ services:
       - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9092:9090"     # Mapped to 9092 to avoid conflict with intellaro metrics
+      - "19092:9090"    # Mapped to 19092 to avoid conflict with SSH tunnel ports
     networks:
       - intellaro-net
     restart: unless-stopped
@@ -97,9 +97,11 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./docker/grafana-dashboard-provider.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
+      - ./docker/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "13000:3000"
     networks:
       - intellaro-net
     restart: unless-stopped

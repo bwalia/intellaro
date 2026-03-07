@@ -47,9 +47,9 @@ services:
     volumes:
       - ./config.yaml:/etc/intellaro/config.yaml:ro
     ports:
-      - "8080:8080"    # Proxy
-      - "9090:9090"    # Metrics
-      - "9091:9091"    # MCP API
+      - "18080:8080"   # Proxy
+      - "19090:9090"   # Metrics
+      - "19091:9091"   # MCP API
     depends_on:
       backend1:
         condition: service_healthy
