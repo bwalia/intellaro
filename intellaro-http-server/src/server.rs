@@ -3,6 +3,7 @@
 //! Manages listener binding, TLS termination, connection acceptance,
 //! and request dispatching across an async worker pool.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,11 +11,15 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use intellaro_http_router::engine::RoutingError;
+use intellaro_http_router::matcher::RequestInfo;
+use intellaro_http_router::RoutingEngine;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::cache::CacheLayer;
+use crate::circuit_breaker::{self, CircuitBreakerRegistry};
 use crate::config::{ConfigManager, ListenerConfig, StaticRootConfig};
 use crate::logging;
 use crate::proxy::ProxyEngine;
@@ -30,6 +35,8 @@ pub struct AppState {
     pub cache_layer: CacheLayer,
     pub security_engine: SecurityEngine,
     pub static_roots: Vec<StaticRootConfig>,
+    pub routing_engine: Option<RoutingEngine>,
+    pub circuit_breakers: CircuitBreakerRegistry,
 }
 
 /// Start the HTTP server with all configured listeners.
@@ -39,8 +46,18 @@ pub struct AppState {
 pub async fn run(
     config_manager: ConfigManager,
     mut shutdown_rx: watch::Receiver<bool>,
+    routing_engine: Option<RoutingEngine>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = config_manager.get().await;
+
+    // Initialize circuit breakers from upstream configs.
+    let circuit_breakers = CircuitBreakerRegistry::new();
+    for upstream in &config.upstreams {
+        if let Some(ref cb_config) = upstream.circuit_breaker {
+            circuit_breakers.register(&upstream.name, cb_config.clone());
+            info!(upstream = %upstream.name, "Circuit breaker registered");
+        }
+    }
 
     let state = Arc::new(AppState {
         config_manager: config_manager.clone(),
@@ -48,6 +65,8 @@ pub async fn run(
         cache_layer: CacheLayer::new(&config.cache),
         security_engine: SecurityEngine::new(&config.security),
         static_roots: config.static_roots.clone(),
+        routing_engine,
+        circuit_breakers,
     });
 
     let mut listener_handles = Vec::new();
@@ -184,21 +203,189 @@ async fn handle_request(
         return Ok(response);
     }
 
-    // 4. Proxy to upstream
-    let response = match state.proxy_engine.forward(&req).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            error!(%err, %path, "Proxy error");
-            metrics::counter!("proxy_errors_total").increment(1);
-            Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
-                .unwrap()
+    // 4. Intelligent routing engine (if configured)
+    if let Some(ref engine) = state.routing_engine {
+        let owned_info = OwnedRequestInfo::from_request(&req);
+        let request_info = owned_info.as_request_info();
+        let source_ip = peer_addr.ip().to_string();
+
+        match engine.route(&request_info, None, Some(&source_ip)) {
+            Ok(decision) => {
+                let route_start = std::time::Instant::now();
+                debug!(
+                    rule = %decision.matched_rule,
+                    backend = %decision.backend_id,
+                    group = %decision.backend_group,
+                    canary = decision.is_canary,
+                    "Routing engine decision"
+                );
+
+                let response = match state
+                    .proxy_engine
+                    .forward_to(&req, &decision.backend_id)
+                    .await
+                {
+                    Ok(resp) => {
+                        let latency_ms = route_start.elapsed().as_secs_f64() * 1000.0;
+                        engine.record_backend_latency(&decision.backend_id, latency_ms);
+                        engine.release_backend(&decision.backend_state);
+                        resp
+                    }
+                    Err(err) => {
+                        engine.record_backend_error(
+                            &decision.backend_id,
+                            &decision.backend_group,
+                            decision.is_canary,
+                            decision.canary_deployment.as_deref(),
+                        );
+                        engine.release_backend(&decision.backend_state);
+                        error!(%err, %path, backend = %decision.backend_id, "Routed proxy error");
+                        metrics::counter!("proxy_errors_total").increment(1);
+                        Response::builder()
+                            .status(StatusCode::BAD_GATEWAY)
+                            .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
+                            .unwrap()
+                    }
+                };
+
+                state.cache_layer.store(&req, &response).await;
+                let status = response.status().as_u16();
+                logging::record_response(status, &method);
+                logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+                return Ok(response);
+            }
+            Err(RoutingError::NoMatchingRule) => {
+                // Fall through to default proxy behavior
+                debug!(%path, "No routing rule matched, falling back to default proxy");
+            }
+            Err(err) => {
+                warn!(%err, %path, "Routing engine error");
+                metrics::counter!("routing_errors_total").increment(1);
+                let status_code = match err {
+                    RoutingError::CircuitBreakerOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
+                    _ => StatusCode::BAD_GATEWAY,
+                };
+                let response = Response::builder()
+                    .status(status_code)
+                    .body(BoxBody::new(hyper::body::Bytes::from(err.to_string())))
+                    .unwrap();
+                logging::record_response(status_code.as_u16(), &method);
+                logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+                return Ok(response);
+            }
         }
+    }
+
+    // 5. Default proxy to upstream with circuit breaker + retry
+    let upstream_name = state.proxy_engine.resolve_upstream(&req);
+
+    // Check circuit breaker before forwarding.
+    if let Some(cb) = state.circuit_breakers.get(&upstream_name) {
+        if !cb.allow_request().await {
+            metrics::counter!("circuit_breaker_rejections_total").increment(1);
+            let response = Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(BoxBody::new(hyper::body::Bytes::from(
+                    "Service Unavailable (circuit breaker open)",
+                )))
+                .unwrap();
+            logging::record_response(503, &method);
+            logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+            return Ok(response);
+        }
+    }
+
+    // Determine retry config for this upstream.
+    let retry_config = {
+        let config = state.config_manager.get().await;
+        config
+            .upstreams
+            .iter()
+            .find(|u| u.name == upstream_name)
+            .and_then(|u| u.retry.clone())
     };
 
-    // 4. Store in cache if cacheable
-    state.cache_layer.store(&req, &response).await;
+    let max_attempts = retry_config
+        .as_ref()
+        .map(|r| r.max_retries + 1)
+        .unwrap_or(1);
+
+    let mut last_response = None;
+
+    for attempt in 0..max_attempts {
+        match state.proxy_engine.forward(&req).await {
+            Ok(resp) => {
+                let status_code = resp.status().as_u16();
+
+                // Check if we should retry this status code.
+                if attempt + 1 < max_attempts {
+                    if let Some(ref rc) = retry_config {
+                        if circuit_breaker::is_retryable_status(status_code, rc) {
+                            debug!(
+                                attempt = attempt + 1,
+                                status = status_code,
+                                "Retryable status, will retry"
+                            );
+                            let backoff = circuit_breaker::calculate_backoff(attempt, rc);
+                            tokio::time::sleep(backoff).await;
+                            metrics::counter!("proxy_retries_total").increment(1);
+                            last_response = Some(resp);
+                            continue;
+                        }
+                    }
+                }
+
+                // Record circuit breaker success.
+                if let Some(cb) = state.circuit_breakers.get(&upstream_name) {
+                    cb.record_success().await;
+                }
+
+                state.cache_layer.store(&req, &resp).await;
+                let status = resp.status().as_u16();
+                logging::record_response(status, &method);
+                logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+                return Ok(resp);
+            }
+            Err(err) => {
+                // Record circuit breaker failure.
+                if let Some(cb) = state.circuit_breakers.get(&upstream_name) {
+                    cb.record_failure().await;
+                }
+
+                if attempt + 1 < max_attempts {
+                    if let Some(ref rc) = retry_config {
+                        debug!(
+                            attempt = attempt + 1,
+                            %err,
+                            "Proxy error, will retry"
+                        );
+                        let backoff = circuit_breaker::calculate_backoff(attempt, rc);
+                        tokio::time::sleep(backoff).await;
+                        metrics::counter!("proxy_retries_total").increment(1);
+                        continue;
+                    }
+                }
+
+                error!(%err, %path, "Proxy error");
+                metrics::counter!("proxy_errors_total").increment(1);
+                let response = Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
+                    .unwrap();
+                logging::record_response(502, &method);
+                logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+                return Ok(response);
+            }
+        }
+    }
+
+    // All retries exhausted — return the last response.
+    let response = last_response.unwrap_or_else(|| {
+        Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
+            .unwrap()
+    });
 
     let status = response.status().as_u16();
     logging::record_response(status, &method);
@@ -268,5 +455,77 @@ fn guess_content_type(path: &std::path::Path) -> &'static str {
         Some("woff") => "font/woff",
         Some("txt") => "text/plain",
         _ => "application/octet-stream",
+    }
+}
+
+/// Owned request info data that can produce a borrowed `RequestInfo`.
+struct OwnedRequestInfo {
+    host: Option<String>,
+    path: String,
+    method: String,
+    headers: HashMap<String, String>,
+    query_params: HashMap<String, String>,
+    cookies: HashMap<String, String>,
+    content_type: Option<String>,
+}
+
+impl OwnedRequestInfo {
+    fn from_request(req: &Request<Incoming>) -> Self {
+        // Extract headers
+        let mut headers = HashMap::new();
+        for (key, value) in req.headers().iter() {
+            if let Ok(v) = value.to_str() {
+                headers.insert(key.as_str().to_lowercase(), v.to_string());
+            }
+        }
+
+        // Extract host
+        let host = headers.get("host").cloned();
+
+        // Extract content type
+        let content_type = headers.get("content-type").cloned();
+
+        // Extract query params
+        let mut query_params = HashMap::new();
+        if let Some(query) = req.uri().query() {
+            for pair in query.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    query_params.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        // Extract cookies
+        let mut cookies = HashMap::new();
+        if let Some(cookie_header) = headers.get("cookie") {
+            for cookie in cookie_header.split(';') {
+                let cookie = cookie.trim();
+                if let Some((k, v)) = cookie.split_once('=') {
+                    cookies.insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+        }
+
+        Self {
+            host,
+            path: req.uri().path().to_string(),
+            method: req.method().as_str().to_string(),
+            headers,
+            query_params,
+            cookies,
+            content_type,
+        }
+    }
+
+    fn as_request_info(&self) -> RequestInfo<'_> {
+        RequestInfo {
+            host: self.host.as_deref(),
+            path: &self.path,
+            method: &self.method,
+            headers: &self.headers,
+            query_params: &self.query_params,
+            cookies: &self.cookies,
+            content_type: self.content_type.as_deref(),
+        }
     }
 }

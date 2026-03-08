@@ -3,21 +3,31 @@
 //! A high-performance, modular HTTP(S) server with reverse proxy, load balancing,
 //! caching, security policy enforcement, clustering, and a management control plane.
 
+mod audit;
 mod cache;
+mod circuit_breaker;
 mod cluster;
 mod config;
+mod config_versioning;
 mod logging;
 mod mcp;
+mod oidc;
 mod proxy;
+mod rbac;
 mod security;
 mod server;
+mod tenant;
+mod transform;
 
 use std::sync::Arc;
 
 use clap::Parser;
+use intellaro_http_router::balancer::Backend;
+use intellaro_http_router::config::BalancerStrategy;
+use intellaro_http_router::{RouterState, RoutingEngine};
 use tokio::signal;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::cluster::ClusterManager;
 use crate::config::ConfigManager;
@@ -115,8 +125,60 @@ async fn main() {
         }
     }
 
+    // ── Build routing engine (if configured) ─────────────────────────
+    let routing_engine = if let Some(ref router_config) = config.router {
+        match RouterState::from_config(router_config.clone()) {
+            Ok(state) => {
+                let shared_state = Arc::new(state);
+
+                // Register server upstreams as backend groups in the routing engine.
+                for upstream in &config.upstreams {
+                    let backends: Vec<Backend> = upstream
+                        .servers
+                        .iter()
+                        .map(|s| Backend {
+                            id: s.address.clone(),
+                            weight: s.weight,
+                            healthy: true,
+                        })
+                        .collect();
+
+                    let strategy = match upstream.load_balancing.as_str() {
+                        "round_robin" => BalancerStrategy::RoundRobin,
+                        "least_connections" => BalancerStrategy::LeastConnections,
+                        "weighted" => BalancerStrategy::Weighted,
+                        "random" => BalancerStrategy::Random,
+                        "consistent_hash" => BalancerStrategy::ConsistentHash,
+                        _ => BalancerStrategy::RoundRobin,
+                    };
+
+                    shared_state.register_backend_group(&upstream.name, backends, strategy);
+                    info!(
+                        upstream = %upstream.name,
+                        backends = upstream.servers.len(),
+                        strategy = %upstream.load_balancing,
+                        "Registered upstream as router backend group"
+                    );
+                }
+
+                let engine = RoutingEngine::new(shared_state);
+                info!(
+                    rules = router_config.rules.len(),
+                    "Routing engine initialized"
+                );
+                Some(engine)
+            }
+            Err(err) => {
+                warn!(%err, "Failed to initialize routing engine, falling back to default proxy");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // ── Start the HTTP server ────────────────────────────────────────
-    if let Err(err) = server::run(config_manager, shutdown_rx).await {
+    if let Err(err) = server::run(config_manager, shutdown_rx, routing_engine).await {
         error!(%err, "HTTP server error");
     }
 

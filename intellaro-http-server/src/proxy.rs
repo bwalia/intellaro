@@ -154,7 +154,7 @@ impl ProxyEngine {
     }
 
     /// Resolve which upstream group should handle this request.
-    fn resolve_upstream(&self, req: &Request<Incoming>) -> String {
+    pub fn resolve_upstream(&self, req: &Request<Incoming>) -> String {
         // Default strategy: use Host header or fall back to first upstream.
         if let Some(host) = req.headers().get("host").and_then(|h| h.to_str().ok()) {
             if self.upstreams.contains_key(host) {
@@ -233,6 +233,50 @@ impl ProxyEngine {
                     % healthy_backends.len();
                 Ok(healthy_backends[index].clone())
             }
+        }
+    }
+
+    /// Forward a request to a specific backend address (used by the routing engine).
+    pub async fn forward_to(
+        &self,
+        req: &Request<Incoming>,
+        backend_address: &str,
+    ) -> Result<Response<BoxBody>, ProxyError> {
+        let target_url = format!(
+            "http://{}{}",
+            backend_address,
+            req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+        );
+
+        metrics::counter!("proxy_requests_total", "backend" => backend_address.to_string())
+            .increment(1);
+
+        let result = self
+            .http_client
+            .request(req.method().clone(), &target_url)
+            .headers(clone_headers(req.headers()))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                let headers = resp.headers().clone();
+                let body_bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|err| ProxyError::BackendError(err.to_string()))?;
+
+                let mut builder = Response::builder().status(status);
+                for (key, value) in headers.iter() {
+                    builder = builder.header(key, value);
+                }
+
+                builder
+                    .body(BoxBody::new(hyper::body::Bytes::from(body_bytes.to_vec())))
+                    .map_err(|err| ProxyError::BackendError(err.to_string()))
+            }
+            Err(err) => Err(ProxyError::BackendError(err.to_string())),
         }
     }
 
