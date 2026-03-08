@@ -68,6 +68,9 @@ thiserror = "2"
 # System information (CPU, memory, disk, hostname)
 sysinfo = "0.33"
 
+# SHA-256 hashing (config versioning)
+sha2 = "0.10"
+
 # Intelligent routing engine (in-process library)
 intellaro-http-router = { path = "../intellaro-http-router" }
 
