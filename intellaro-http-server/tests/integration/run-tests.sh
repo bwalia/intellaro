@@ -133,8 +133,8 @@ assert_body_contains "Status contains listeners count" \
     "listeners" \
     -H "X-Api-Key: ${API_KEY}" "${MCP}/api/v1/status"
 
-assert_body_contains "Status reports cache_enabled" \
-    "cache_enabled" \
+assert_body_contains "Status reports cache enabled" \
+    "\"enabled\":true" \
     -H "X-Api-Key: ${API_KEY}" "${MCP}/api/v1/status"
 
 # 1.3 Config GET
