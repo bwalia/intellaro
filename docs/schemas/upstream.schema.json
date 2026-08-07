@@ -1,0 +1,289 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Upstream",
+  "description": "A named backend pool that routes can reference via `upstreamRef`.",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "description": "Must be `intellaro.io/v1`.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Must be `Upstream`.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/definitions/Metadata"
+    },
+    "spec": {
+      "$ref": "#/definitions/UpstreamSpec"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ActiveHealthCheck": {
+      "description": "Active health-check probe definition.",
+      "type": "object",
+      "properties": {
+        "healthyThreshold": {
+          "description": "Consecutive successes before an unhealthy backend recovers.",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "interval": {
+          "description": "Interval between probes.",
+          "default": "10s",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        },
+        "path": {
+          "description": "HTTP path to probe (ignored for `tcp`).",
+          "default": "/healthz",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "Per-probe timeout.",
+          "default": "5s",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        },
+        "type": {
+          "description": "Probe type. `http` is fully supported today; `tcp` is reserved for the L4 stream engine (Phase 2) and is rejected at compile time.",
+          "default": "http",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProbeType"
+            }
+          ]
+        },
+        "unhealthyThreshold": {
+          "description": "Consecutive failures before a backend is marked unhealthy.",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Backend": {
+      "description": "A single backend endpoint.",
+      "type": "object",
+      "required": [
+        "address"
+      ],
+      "properties": {
+        "address": {
+          "description": "Backend address, `host:port` (e.g. `10.8.0.9:6443`, `app.internal:8080`).",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Relative weight for weighted balancing. Defaults to 1.",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "BackoffStrategy": {
+      "type": "string",
+      "enum": [
+        "exponential",
+        "linear",
+        "constant"
+      ]
+    },
+    "CircuitBreaker": {
+      "type": "object",
+      "properties": {
+        "failureThreshold": {
+          "description": "Consecutive failures that trip the circuit.",
+          "default": 5,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "halfOpenMaxRequests": {
+          "description": "Requests allowed through while half-open.",
+          "default": 3,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "openDuration": {
+          "description": "How long the circuit stays open before probing half-open.",
+          "default": "30s",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HumanDuration": {
+      "description": "Human-readable duration (e.g. \"5s\", \"100ms\", \"2m 30s\") or a bare number of seconds",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "LoadBalancing": {
+      "description": "Load-balancing strategy for a backend pool.",
+      "type": "string",
+      "enum": [
+        "round_robin",
+        "least_conn",
+        "weighted",
+        "random",
+        "consistent_hash"
+      ]
+    },
+    "Metadata": {
+      "description": "Object metadata shared by every kind.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "labels": {
+          "description": "Free-form labels (environment, POP, team, …).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "Unique name for this object (per kind).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProbeType": {
+      "type": "string",
+      "enum": [
+        "http",
+        "tcp"
+      ]
+    },
+    "Retry": {
+      "type": "object",
+      "properties": {
+        "backoff": {
+          "default": "exponential",
+          "allOf": [
+            {
+              "$ref": "#/definitions/BackoffStrategy"
+            }
+          ]
+        },
+        "backoffBase": {
+          "description": "Base delay for the backoff schedule.",
+          "default": "100ms",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        },
+        "maxRetries": {
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "retryOnStatus": {
+          "description": "Upstream status codes that trigger a retry.",
+          "default": [
+            502,
+            503,
+            504
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0.0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "UpstreamSpec": {
+      "type": "object",
+      "required": [
+        "backends"
+      ],
+      "properties": {
+        "backends": {
+          "description": "Backend endpoints in this pool.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Backend"
+          }
+        },
+        "circuitBreaker": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CircuitBreaker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "healthCheck": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ActiveHealthCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loadBalancing": {
+          "default": "round_robin",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LoadBalancing"
+            }
+          ]
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Retry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

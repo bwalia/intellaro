@@ -1,0 +1,542 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Gateway",
+  "description": "A `Gateway` binds listeners to virtual hosts and routes.",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "description": "Must be `intellaro.io/v1`.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Must be `Gateway`.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/definitions/Metadata"
+    },
+    "spec": {
+      "$ref": "#/definitions/GatewaySpec"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "AcmeSettings": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "description": "Contact e-mail for the ACME account.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "staging": {
+          "description": "Use the staging directory (recommended while testing).",
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ActiveHealthCheck": {
+      "description": "Active health-check probe definition.",
+      "type": "object",
+      "properties": {
+        "healthyThreshold": {
+          "description": "Consecutive successes before an unhealthy backend recovers.",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "interval": {
+          "description": "Interval between probes.",
+          "default": "10s",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        },
+        "path": {
+          "description": "HTTP path to probe (ignored for `tcp`).",
+          "default": "/healthz",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "Per-probe timeout.",
+          "default": "5s",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        },
+        "type": {
+          "description": "Probe type. `http` is fully supported today; `tcp` is reserved for the L4 stream engine (Phase 2) and is rejected at compile time.",
+          "default": "http",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProbeType"
+            }
+          ]
+        },
+        "unhealthyThreshold": {
+          "description": "Consecutive failures before a backend is marked unhealthy.",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Backend": {
+      "description": "A single backend endpoint.",
+      "type": "object",
+      "required": [
+        "address"
+      ],
+      "properties": {
+        "address": {
+          "description": "Backend address, `host:port` (e.g. `10.8.0.9:6443`, `app.internal:8080`).",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Relative weight for weighted balancing. Defaults to 1.",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GatewaySpec": {
+      "type": "object",
+      "required": [
+        "hosts",
+        "listeners"
+      ],
+      "properties": {
+        "hosts": {
+          "description": "Virtual hosts served by this gateway.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Host"
+          }
+        },
+        "listeners": {
+          "description": "Sockets this gateway accepts traffic on.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Listener"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Host": {
+      "description": "A virtual host: a hostname plus its ordered routes.",
+      "type": "object",
+      "required": [
+        "name",
+        "routes"
+      ],
+      "properties": {
+        "name": {
+          "description": "Hostname to match. Supports a leading wildcard (`*.example.com`) and the catch-all `\"*\"`.",
+          "type": "string"
+        },
+        "routes": {
+          "description": "Routes evaluated for requests to this host.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Route"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "HumanDuration": {
+      "description": "Human-readable duration (e.g. \"5s\", \"100ms\", \"2m 30s\") or a bare number of seconds",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "Listener": {
+      "description": "A listening socket.",
+      "type": "object",
+      "required": [
+        "name",
+        "port"
+      ],
+      "properties": {
+        "address": {
+          "description": "Bind address. Defaults to `0.0.0.0`.",
+          "default": "0.0.0.0",
+          "type": "string"
+        },
+        "name": {
+          "description": "Listener name, unique within the gateway.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Port to listen on.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "protocol": {
+          "description": "`HTTP` or `HTTPS`.",
+          "default": "HTTP",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ListenerProtocol"
+            }
+          ]
+        },
+        "tls": {
+          "description": "TLS settings; required when `protocol: HTTPS`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TlsSettings"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ListenerProtocol": {
+      "type": "string",
+      "enum": [
+        "HTTP",
+        "HTTPS"
+      ]
+    },
+    "LoadBalancing": {
+      "description": "Load-balancing strategy for a backend pool.",
+      "type": "string",
+      "enum": [
+        "round_robin",
+        "least_conn",
+        "weighted",
+        "random",
+        "consistent_hash"
+      ]
+    },
+    "Metadata": {
+      "description": "Object metadata shared by every kind.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "labels": {
+          "description": "Free-form labels (environment, POP, team, …).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "Unique name for this object (per kind).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PathMatch": {
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "default": "Prefix",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PathMatchType"
+            }
+          ]
+        },
+        "value": {
+          "description": "The path value, must start with `/` (a regex for `Regex` matches).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PathMatchType": {
+      "type": "string",
+      "enum": [
+        "Prefix",
+        "Exact",
+        "Regex"
+      ]
+    },
+    "PolicyRef": {
+      "description": "A named reference to a policy object (e.g. a `WafPolicy`).",
+      "type": "object",
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "description": "Name of the referenced policy.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProbeType": {
+      "type": "string",
+      "enum": [
+        "http",
+        "tcp"
+      ]
+    },
+    "Route": {
+      "description": "A single route: match conditions plus a destination and its policies.",
+      "type": "object",
+      "properties": {
+        "backends": {
+          "description": "Inline backend pool. Mutually exclusive with `upstreamRef`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Backend"
+          }
+        },
+        "healthCheck": {
+          "description": "Health checking for inline `backends`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RouteHealthCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loadBalancing": {
+          "description": "Load-balancing strategy for inline `backends`.",
+          "default": "round_robin",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LoadBalancing"
+            }
+          ]
+        },
+        "match": {
+          "description": "Match conditions. Defaults to `path: {type: Prefix, value: /}`.",
+          "default": {
+            "path": {
+              "type": "Prefix",
+              "value": "/"
+            }
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RouteMatch"
+            }
+          ]
+        },
+        "policies": {
+          "description": "Policies attached to this route (by name), e.g. a `WafPolicy`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PolicyRef"
+          }
+        },
+        "priority": {
+          "description": "Explicit priority override. Higher wins. When omitted, priority is derived from path specificity (Exact > longer Prefix > Regex).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "timeouts": {
+          "description": "Proxy timeouts for this route.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Timeouts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upstreamRef": {
+          "description": "Reference to a named `Upstream`. Mutually exclusive with `backends`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteHealthCheck": {
+      "type": "object",
+      "properties": {
+        "active": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ActiveHealthCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteMatch": {
+      "type": "object",
+      "properties": {
+        "headers": {
+          "description": "Header equality conditions (all must match).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "methods": {
+          "description": "HTTP methods to match (empty = all).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "description": "Path condition.",
+          "default": {
+            "type": "Prefix",
+            "value": "/"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/PathMatch"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Timeouts": {
+      "type": "object",
+      "properties": {
+        "connect": {
+          "description": "Connection establishment timeout.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read": {
+          "description": "Time allowed for the upstream response.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "send": {
+          "description": "Time allowed to send the request upstream.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TlsMode": {
+      "type": "string",
+      "enum": [
+        "Terminate",
+        "Passthrough"
+      ]
+    },
+    "TlsSettings": {
+      "type": "object",
+      "properties": {
+        "acme": {
+          "description": "ACME (Let's Encrypt) automation. Schema-reserved: automation lands in Phase 1; until then certPath/keyPath must be provided.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AcmeSettings"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "certPath": {
+          "description": "Path to the PEM certificate chain.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyPath": {
+          "description": "Path to the PEM private key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minVersion": {
+          "description": "Minimum TLS version: `\"1.2\"` (default) or `\"1.3\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "TLS mode. Only `Terminate` is supported today.",
+          "default": "Terminate",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TlsMode"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

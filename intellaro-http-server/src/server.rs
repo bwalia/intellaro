@@ -5,9 +5,11 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use hyper::body::Incoming;
+use http_body_util::BodyExt;
+use hyper::body::{Bytes, Incoming};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
@@ -28,10 +30,13 @@ use crate::security::SecurityEngine;
 /// Full-body response type used throughout the server.
 pub type BoxBody = http_body_util::Full<hyper::body::Bytes>;
 
+/// Maximum buffered request body size (Phase-0 store-and-forward cap).
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Shared application state accessible from all request handlers.
 pub struct AppState {
     pub config_manager: ConfigManager,
-    pub proxy_engine: ProxyEngine,
+    pub proxy_engine: Arc<ProxyEngine>,
     pub cache_layer: CacheLayer,
     pub security_engine: SecurityEngine,
     pub static_roots: Vec<StaticRootConfig>,
@@ -47,33 +52,44 @@ pub async fn run(
     config_manager: ConfigManager,
     mut shutdown_rx: watch::Receiver<bool>,
     routing_engine: Option<RoutingEngine>,
+    ready: Option<Arc<AtomicBool>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = config_manager.get().await;
 
-    // Initialize circuit breakers from upstream configs.
-    let circuit_breakers = CircuitBreakerRegistry::new();
-    for upstream in &config.upstreams {
-        if let Some(ref cb_config) = upstream.circuit_breaker {
-            circuit_breakers.register(&upstream.name, cb_config.clone());
-            info!(upstream = %upstream.name, "Circuit breaker registered");
-        }
-    }
+    let state = build_app_state(config_manager.clone(), &config, routing_engine);
 
-    let state = Arc::new(AppState {
-        config_manager: config_manager.clone(),
-        proxy_engine: ProxyEngine::new(&config.upstreams),
-        cache_layer: CacheLayer::new(&config.cache),
-        security_engine: SecurityEngine::new(&config.security),
-        static_roots: config.static_roots.clone(),
-        routing_engine,
-        circuit_breakers,
+    // Data-plane state is distributed to listeners via a watch channel so a
+    // config reload swaps in a fresh AppState without dropping connections.
+    // Listener sockets themselves are fixed for the process lifetime —
+    // changing bind addresses still requires a restart.
+    let (state_tx, state_rx) = watch::channel(state);
+
+    let mut change_rx = config_manager.subscribe();
+    let reload_manager = config_manager.clone();
+    let reload_task = tokio::spawn(async move {
+        loop {
+            if change_rx.changed().await.is_err() {
+                break;
+            }
+            let new_config = reload_manager.get().await;
+            let engine = crate::bootstrap::build_routing_engine(&new_config);
+            let new_state = build_app_state(reload_manager.clone(), &new_config, engine);
+            if state_tx.send(new_state).is_err() {
+                break;
+            }
+            info!("Data plane rebuilt from updated configuration (listeners unchanged)");
+        }
     });
 
     let mut listener_handles = Vec::new();
 
     for listener_config in &config.listeners {
-        let handle = spawn_listener(listener_config.clone(), Arc::clone(&state)).await?;
+        let handle = spawn_listener(listener_config.clone(), state_rx.clone()).await?;
         listener_handles.push(handle);
+    }
+
+    if let Some(ready) = &ready {
+        ready.store(true, Ordering::Relaxed);
     }
 
     info!(
@@ -94,15 +110,44 @@ pub async fn run(
     for handle in listener_handles {
         handle.abort();
     }
+    reload_task.abort();
 
     info!("Server shut down gracefully");
     Ok(())
 }
 
+/// Build the full request-path state from a configuration snapshot.
+fn build_app_state(
+    config_manager: ConfigManager,
+    config: &crate::config::ServerConfig,
+    routing_engine: Option<RoutingEngine>,
+) -> Arc<AppState> {
+    let circuit_breakers = CircuitBreakerRegistry::new();
+    for upstream in &config.upstreams {
+        if let Some(ref cb_config) = upstream.circuit_breaker {
+            circuit_breakers.register(&upstream.name, cb_config.clone());
+            info!(upstream = %upstream.name, "Circuit breaker registered");
+        }
+    }
+
+    let proxy_engine = Arc::new(ProxyEngine::new(&config.upstreams));
+    proxy_engine.start_health_checks();
+
+    Arc::new(AppState {
+        config_manager,
+        proxy_engine,
+        cache_layer: CacheLayer::new(&config.cache),
+        security_engine: SecurityEngine::new(&config.security),
+        static_roots: config.static_roots.clone(),
+        routing_engine,
+        circuit_breakers,
+    })
+}
+
 /// Spawn a TCP listener task for a single bind address.
 async fn spawn_listener(
     listener_config: ListenerConfig,
-    state: Arc<AppState>,
+    state_rx: watch::Receiver<Arc<AppState>>,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let tcp_listener = TcpListener::bind(listener_config.address).await?;
 
@@ -114,22 +159,22 @@ async fn spawn_listener(
     );
 
     let handle = tokio::spawn(async move {
-        accept_loop(tcp_listener, state).await;
+        accept_loop(tcp_listener, state_rx).await;
     });
 
     Ok(handle)
 }
 
 /// Core accept loop — accepts TCP connections and spawns a task per connection.
-async fn accept_loop(listener: TcpListener, state: Arc<AppState>) {
+async fn accept_loop(listener: TcpListener, state_rx: watch::Receiver<Arc<AppState>>) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
-                let state = Arc::clone(&state);
+                let state_rx = state_rx.clone();
                 metrics::gauge!("active_connections").increment(1.0);
 
                 tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, peer_addr, state).await {
+                    if let Err(err) = handle_connection(stream, peer_addr, state_rx).await {
                         warn!(%peer_addr, %err, "Connection error");
                     }
                     metrics::gauge!("active_connections").decrement(1.0);
@@ -143,15 +188,18 @@ async fn accept_loop(listener: TcpListener, state: Arc<AppState>) {
 }
 
 /// Handle a single TCP connection: run HTTP protocol over it.
+///
+/// State is resolved per request (not per connection) so long-lived
+/// keep-alive connections observe config reloads immediately.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
-    state: Arc<AppState>,
+    state_rx: watch::Receiver<Arc<AppState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let io = TokioIo::new(stream);
 
     let service = hyper::service::service_fn(move |req: Request<Incoming>| {
-        let state = Arc::clone(&state);
+        let state = state_rx.borrow().clone();
         let addr = peer_addr;
         async move { handle_request(req, addr, state).await }
     });
@@ -175,8 +223,35 @@ async fn handle_request(
 
     logging::record_request(&method, &path);
 
+    // Buffer the request body up-front (bounded) so it can be forwarded
+    // and replayed across retries. Streaming pass-through is Phase 1.
+    let (parts, body) = req.into_parts();
+    let body_bytes: Bytes =
+        match http_body_util::Limited::new(body, MAX_REQUEST_BODY_BYTES).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(err) => {
+                let too_large = err.downcast_ref::<http_body_util::LengthLimitError>().is_some();
+                let status = if too_large {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                warn!(%path, too_large, "Failed to read request body");
+                logging::record_response(status.as_u16(), &method);
+                return Ok(Response::builder()
+                    .status(status)
+                    .body(BoxBody::new(hyper::body::Bytes::from(
+                        status.canonical_reason().unwrap_or("error").to_string(),
+                    )))
+                    .unwrap());
+            }
+        };
+    // Body-less view of the request for match/cache/security layers.
+    let req_view: Request<()> = Request::from_parts(parts, ());
+    let req = &req_view;
+
     // 1. Security checks
-    if let Some(response) = state.security_engine.check(&req, peer_addr).await {
+    if let Some(response) = state.security_engine.check(req, peer_addr).await {
         let status = response.status().as_u16();
         logging::record_response(status, &method);
         logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -184,7 +259,7 @@ async fn handle_request(
     }
 
     // 2. Cache lookup (for cacheable requests)
-    if let Some(cached_response) = state.cache_layer.get(&req).await {
+    if let Some(cached_response) = state.cache_layer.get(req).await {
         metrics::counter!("cache_hits_total").increment(1);
         let status = cached_response.status().as_u16();
         logging::record_response(status, &method);
@@ -196,7 +271,7 @@ async fn handle_request(
 
     // 3. Static file serving
     if let Some(response) = serve_static_file(&path, &state.static_roots).await {
-        state.cache_layer.store(&req, &response).await;
+        state.cache_layer.store(req, &response).await;
         let status = response.status().as_u16();
         logging::record_response(status, &method);
         logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -205,7 +280,7 @@ async fn handle_request(
 
     // 4. Intelligent routing engine (if configured)
     if let Some(ref engine) = state.routing_engine {
-        let owned_info = OwnedRequestInfo::from_request(&req);
+        let owned_info = OwnedRequestInfo::from_request(req);
         let request_info = owned_info.as_request_info();
         let source_ip = peer_addr.ip().to_string();
 
@@ -222,7 +297,7 @@ async fn handle_request(
 
                 let response = match state
                     .proxy_engine
-                    .forward_to(&req, &decision.backend_id)
+                    .forward_to(req, &decision.backend_id, body_bytes.clone(), peer_addr)
                     .await
                 {
                     Ok(resp) => {
@@ -248,7 +323,7 @@ async fn handle_request(
                     }
                 };
 
-                state.cache_layer.store(&req, &response).await;
+                state.cache_layer.store(req, &response).await;
                 let status = response.status().as_u16();
                 logging::record_response(status, &method);
                 logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -277,7 +352,7 @@ async fn handle_request(
     }
 
     // 5. Default proxy to upstream with circuit breaker + retry
-    let upstream_name = state.proxy_engine.resolve_upstream(&req);
+    let upstream_name = state.proxy_engine.resolve_upstream(req);
 
     // Check circuit breaker before forwarding.
     if let Some(cb) = state.circuit_breakers.get(&upstream_name) {
@@ -313,7 +388,11 @@ async fn handle_request(
     let mut last_response = None;
 
     for attempt in 0..max_attempts {
-        match state.proxy_engine.forward(&req).await {
+        match state
+            .proxy_engine
+            .forward(req, body_bytes.clone(), peer_addr)
+            .await
+        {
             Ok(resp) => {
                 let status_code = resp.status().as_u16();
 
@@ -340,7 +419,7 @@ async fn handle_request(
                     cb.record_success().await;
                 }
 
-                state.cache_layer.store(&req, &resp).await;
+                state.cache_layer.store(req, &resp).await;
                 let status = resp.status().as_u16();
                 logging::record_response(status, &method);
                 logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -470,7 +549,7 @@ struct OwnedRequestInfo {
 }
 
 impl OwnedRequestInfo {
-    fn from_request(req: &Request<Incoming>) -> Self {
+    fn from_request<B>(req: &Request<B>) -> Self {
         // Extract headers
         let mut headers = HashMap::new();
         for (key, value) in req.headers().iter() {

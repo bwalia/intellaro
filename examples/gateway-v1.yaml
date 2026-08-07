@@ -1,0 +1,100 @@
+# Example intellaro.io/v1 configuration — one edge gateway, a named
+# upstream pool, and a security policy.
+#
+#   intellaro validate --config examples/gateway-v1.yaml
+#   intellaro --role proxy --config examples/gateway-v1.yaml
+#
+# Ops endpoints come up on 0.0.0.0:9090 (/metrics /health /ready).
+# Edit this file while the server runs — routes and backends hot-reload
+# without a restart (bind addresses require one).
+apiVersion: intellaro.io/v1
+kind: Gateway
+metadata:
+  name: pop1-edge
+  labels:
+    env: dev
+    pop: pop1
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      # HTTPS variant (Phase 0 uses static certs; ACME automation is Phase 1):
+      # - name: https
+      #   port: 8443
+      #   protocol: HTTPS
+      #   tls:
+      #     certPath: /etc/intellaro/tls/fullchain.pem
+      #     keyPath: /etc/intellaro/tls/privkey.pem
+      #     minVersion: "1.2"
+  hosts:
+    - name: api.example.com
+      routes:
+        # Most-specific match wins: Exact > longer Prefix > Regex.
+        - match:
+            path: { type: Exact, value: /api/login }
+          backends:
+            - address: 127.0.0.1:9001
+          timeouts:
+            connect: 5s
+            read: 10s
+        - match:
+            path: { type: Prefix, value: /api }
+          upstreamRef: api-pool
+          timeouts:
+            connect: 5s
+            read: 30s
+            send: 30s
+          policies:
+            - ref: waf-strict
+    - name: "*" # catch-all host
+      routes:
+        - match:
+            path: { type: Prefix, value: / }
+          backends:
+            - address: 127.0.0.1:9000
+              weight: 1
+---
+apiVersion: intellaro.io/v1
+kind: Upstream
+metadata:
+  name: api-pool
+spec:
+  backends:
+    - address: 127.0.0.1:9001
+      weight: 2
+    - address: 127.0.0.1:9002
+      weight: 1
+  loadBalancing: least_conn
+  healthCheck:
+    type: http
+    path: /healthz
+    interval: 5s
+    unhealthyThreshold: 2
+  circuitBreaker:
+    failureThreshold: 5
+    openDuration: 30s
+  retry:
+    maxRetries: 2
+    retryOnStatus: [502, 503, 504]
+    backoff: exponential
+    backoffBase: 100ms
+---
+apiVersion: intellaro.io/v1
+kind: WafPolicy
+metadata:
+  name: waf-strict
+spec:
+  mode: block
+  ipDeny:
+    - 203.0.113.0/24
+  rateLimit:
+    maxRequests: 100
+    window: 1m
+  # Enforced by the Phase 3 WAF engine (schema-complete today):
+  rulePacks: [sqli, xss]
+  rules:
+    - id: block-scanner-ua
+      targets: [user_agent]
+      pattern: { type: string, value: sqlmap }
+      action: block

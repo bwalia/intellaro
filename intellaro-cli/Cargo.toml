@@ -1,0 +1,21 @@
+[package]
+name = "intellaro-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Unified `intellaro` binary — one data plane, many roles (proxy, ingress, gateway, agent, control, all)"
+
+[[bin]]
+name = "intellaro"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde_json = "1"
+
+intellaro-config = { path = "../intellaro-config" }
+intellaro-http-server = { path = "../intellaro-http-server" }
+intellaro-ingress = { path = "../intellaro-ingress" }

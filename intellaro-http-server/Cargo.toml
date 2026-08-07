@@ -37,8 +37,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Metrics (Prometheus-compatible)
-metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -73,12 +73,8 @@ sha2 = "0.10"
 
 # Intelligent routing engine (in-process library)
 intellaro-http-router = { path = "../intellaro-http-router" }
+intellaro-config = { path = "../intellaro-config" }
 
 [dev-dependencies]
 tokio-test = "0.4"
 
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-strip = true

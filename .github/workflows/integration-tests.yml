@@ -29,21 +29,18 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            intellaro-http-server/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('intellaro-http-server/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check compilation
-        working-directory: intellaro-http-server
-        run: cargo check --release
+        run: cargo check --release --workspace
 
       - name: Run clippy
-        working-directory: intellaro-http-server
-        run: cargo clippy -- -D warnings || true
+        run: cargo clippy --workspace -- -D warnings || true
 
       - name: Check formatting
-        working-directory: intellaro-http-server
-        run: cargo fmt -- --check || true
+        run: cargo fmt --all -- --check || true
 
   # ── Docker integration tests ─────────────────────────────────────────
   integration:
@@ -63,7 +60,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ hashFiles('intellaro-http-server/Cargo.lock') }}
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-buildx-
 
       - name: Build and start test stack

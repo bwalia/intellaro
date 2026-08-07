@@ -298,6 +298,11 @@ pub struct LoggingConfig {
     /// Prometheus metrics endpoint path (e.g., "/metrics").
     #[serde(default)]
     pub metrics_path: Option<String>,
+
+    /// Address for the ops server (`/metrics`, `/health`, `/ready`).
+    /// Defaults to `0.0.0.0:9090`.
+    #[serde(default)]
+    pub ops_address: Option<SocketAddr>,
 }
 
 /// Cluster configuration for multi-node HA.
@@ -447,6 +452,7 @@ impl Default for LoggingConfig {
             level: default_log_level(),
             format: default_log_format(),
             metrics_path: Some("/metrics".to_string()),
+            ops_address: None,
         }
     }
 }
@@ -508,15 +514,20 @@ impl ConfigManager {
     }
 
     /// Start watching the configuration file for changes (hot reload).
+    ///
+    /// Must be called from within a Tokio runtime: the notify callback
+    /// runs on the watcher's own thread, so reloads are dispatched back
+    /// onto the captured runtime handle.
     pub fn start_file_watcher(&self) -> Result<RecommendedWatcher, ConfigError> {
         let manager = self.clone();
         let watch_path = self.config_path.clone();
+        let runtime = tokio::runtime::Handle::current();
 
         let mut watcher = notify::recommended_watcher(move |result: Result<Event, _>| {
             match result {
-                Ok(event) if event.kind.is_modify() => {
+                Ok(event) if event.kind.is_modify() || event.kind.is_create() => {
                     let manager = manager.clone();
-                    tokio::spawn(async move {
+                    runtime.spawn(async move {
                         if let Err(err) = manager.reload().await {
                             error!(%err, "Failed to hot-reload configuration");
                         }
@@ -539,10 +550,30 @@ impl ConfigManager {
         Ok(watcher)
     }
 
-    /// Read and parse a config file (supports .json and .yaml/.yml).
+    /// Read and parse a config file.
+    ///
+    /// Supports the typed `intellaro.io/v1` multi-document format
+    /// (detected by `apiVersion`) as well as the legacy flat
+    /// `.json` / `.yaml` [`ServerConfig`] layout.
     fn read_config(path: &Path) -> Result<ServerConfig, ConfigError> {
         let content = std::fs::read_to_string(path)
             .map_err(|err| ConfigError::IoError(err.to_string()))?;
+
+        if intellaro_config::is_v1_config(&content) {
+            let set = intellaro_config::load_str(&content)
+                .map_err(|err| ConfigError::ParseError(err.to_string()))?;
+            let compiled = crate::config_v1::compile(&set)?;
+            for warning in &compiled.warnings {
+                warn!(%warning, "intellaro.io/v1 compile note");
+            }
+            info!(
+                gateways = set.gateways.len(),
+                upstreams = set.upstreams.len(),
+                waf_policies = set.waf_policies.len(),
+                "Compiled intellaro.io/v1 configuration"
+            );
+            return Ok(compiled.config);
+        }
 
         let extension = path
             .extension()
@@ -572,6 +603,9 @@ pub enum ConfigError {
 
     #[error("Unsupported config format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("Invalid configuration: {0}")]
+    Invalid(String),
 
     #[error("File watch error: {0}")]
     WatchError(String),

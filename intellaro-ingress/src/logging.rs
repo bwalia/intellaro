@@ -16,19 +16,21 @@ pub fn init() {
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
 
+    // try_init: tolerate an already-installed subscriber so the controller
+    // can be embedded in the unified `intellaro` binary.
     if is_json {
-        fmt()
+        let _ = fmt()
             .json()
             .with_env_filter(filter)
             .with_target(true)
             .with_thread_ids(true)
             .with_file(true)
             .with_line_number(true)
-            .init();
+            .try_init();
     } else {
-        fmt()
+        let _ = fmt()
             .with_env_filter(filter)
             .with_target(true)
-            .init();
+            .try_init();
     }
 }
