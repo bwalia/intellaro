@@ -407,16 +407,60 @@ impl McpServer {
     }
 
     /// PUT /api/v1/config — update the running configuration.
-    async fn handle_update_config(&self, _req: Request<Incoming>) -> Response<BoxBody> {
-        // TODO: Parse body into ServerConfig and apply via config_manager.apply_update().
-        json_response(
-            StatusCode::NOT_IMPLEMENTED,
-            &ApiResponse::<()> {
-                success: false,
-                data: None,
-                error: Some("Runtime config update not yet implemented".to_string()),
-            },
-        )
+    async fn handle_update_config(&self, req: Request<Incoming>) -> Response<BoxBody> {
+        use http_body_util::BodyExt;
+
+        const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
+
+        let body = match http_body_util::Limited::new(req.into_body(), MAX_CONFIG_BYTES)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(err) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &ApiResponse::<()> {
+                        success: false,
+                        data: None,
+                        error: Some(format!("Failed to read request body: {err}")),
+                    },
+                )
+            }
+        };
+
+        match serde_json::from_slice::<crate::config::ServerConfig>(&body) {
+            Ok(new_config) => {
+                let upstreams = new_config.upstreams.len();
+                let rules = new_config
+                    .router
+                    .as_ref()
+                    .map(|r| r.rules.len())
+                    .unwrap_or(0);
+                self.config_manager.apply_update(new_config).await;
+                info!(upstreams, rules, "Configuration updated via management API");
+                json_response(
+                    StatusCode::OK,
+                    &ApiResponse {
+                        success: true,
+                        data: Some(serde_json::json!({
+                            "applied": true,
+                            "upstreams": upstreams,
+                            "router_rules": rules,
+                        })),
+                        error: None,
+                    },
+                )
+            }
+            Err(err) => json_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &ApiResponse::<()> {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Invalid configuration: {err}")),
+                },
+            ),
+        }
     }
 
     /// POST /api/v1/config/reload — reload configuration from disk.

@@ -1,0 +1,70 @@
+{{- if .Values.ingressController.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "intellaro.fullname" . }}-ingress
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress-controller
+spec:
+  replicas: {{ .Values.ingressController.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "intellaro.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: ingress-controller
+  template:
+    metadata:
+      labels:
+        {{- include "intellaro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: ingress-controller
+    spec:
+      serviceAccountName: {{ include "intellaro.serviceAccountName" . }}
+      containers:
+        - name: intellaro-ingress
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --role
+            - ingress
+          env:
+            - name: INTELLARO_MCP_URL
+              value: {{ include "intellaro.mcpUrl" . | quote }}
+            {{- if .Values.ingressController.watchNamespace }}
+            - name: INTELLARO_NAMESPACE
+              value: {{ .Values.ingressController.watchNamespace | quote }}
+            {{- end }}
+            - name: INTELLARO_METRICS_PORT
+              value: {{ .Values.ingressController.metricsPort | quote }}
+            - name: INTELLARO_HEALTH_PORT
+              value: {{ .Values.ingressController.healthPort | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.ingressController.metricsPort }}
+            - name: health
+              containerPort: {{ .Values.ingressController.healthPort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.ingressController.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

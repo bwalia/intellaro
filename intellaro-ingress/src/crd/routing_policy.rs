@@ -224,6 +224,7 @@ pub struct TrafficSplitRule {
 #[serde(rename_all = "camelCase")]
 pub struct SlaRoutingConfig {
     /// How to identify the SLA tier.
+    #[schemars(schema_with = "super::preserve_unknown")]
     pub identifier: SlaIdentifier,
 
     /// Tier definitions, ordered by priority (highest first).
@@ -413,6 +414,10 @@ pub struct PolicyRateLimit {
     /// Rate limit key: how to identify rate-limited entities.
     #[serde(default)]
     pub key: PolicyRateLimitKey,
+
+    /// Header to key on when `key: header`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_header: Option<String>,
 }
 
 fn default_window_secs() -> u64 {
@@ -420,14 +425,17 @@ fn default_window_secs() -> u64 {
 }
 
 /// Rate limit key type.
+///
+/// All variants are plain strings so the generated CRD schema is a
+/// consistent string enum; for `header` the name lives in `keyHeader`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PolicyRateLimitKey {
     /// Rate limit per client IP.
     #[default]
     ClientIp,
-    /// Rate limit per header value.
-    Header(String),
+    /// Rate limit per header value (see `keyHeader`).
+    Header,
     /// Rate limit per authenticated user.
     User,
     /// Rate limit per SLA tier.

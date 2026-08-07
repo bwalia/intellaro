@@ -1,0 +1,12 @@
+{{- if .Values.dataplane.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "intellaro.fullname" . }}-config
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dataplane
+data:
+  config.yaml: |
+    {{- .Values.dataplane.config | nindent 4 }}
+{{- end }}

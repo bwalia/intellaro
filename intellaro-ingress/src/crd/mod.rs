@@ -40,3 +40,18 @@ pub struct IntellaroCondition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_transition_time: Option<String>,
 }
+
+/// Schema override for polymorphic fields (enums mixing string and object
+/// variants), which Kubernetes structural schemas cannot express. Emits
+/// `x-kubernetes-preserve-unknown-fields: true`, matching the hand-written
+/// CRD manifests this crate originally shipped.
+pub(crate) fn preserve_unknown(
+    _gen: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    let mut obj = schemars::schema::SchemaObject::default();
+    obj.extensions.insert(
+        "x-kubernetes-preserve-unknown-fields".to_string(),
+        serde_json::json!(true),
+    );
+    schemars::schema::Schema::Object(obj)
+}

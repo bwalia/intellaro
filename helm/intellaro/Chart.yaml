@@ -1,0 +1,10 @@
+apiVersion: v2
+name: intellaro
+description: >-
+  Intellaro application delivery platform — one binary, many roles.
+  Deploys the data plane (reverse proxy + management API + ops endpoints)
+  and, optionally, the Kubernetes ingress controller that reconciles
+  Intellaro CRDs into it.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
