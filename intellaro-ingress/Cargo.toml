@@ -42,7 +42,3 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true

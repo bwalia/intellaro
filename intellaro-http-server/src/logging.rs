@@ -4,6 +4,8 @@
 //! Prometheus metrics export via a dedicated HTTP endpoint.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::TokioIo;
@@ -29,22 +31,24 @@ pub fn init_tracing(config: &LoggingConfig) {
 
     let env_filter = EnvFilter::new(level_filter.to_string());
 
+    // try_init: tolerate an already-installed subscriber so the server can
+    // be embedded (unified `intellaro` binary, integration tests).
     match config.format.as_str() {
         "json" => {
-            fmt()
+            let _ = fmt()
                 .json()
                 .with_env_filter(env_filter)
                 .with_target(true)
                 .with_thread_ids(true)
                 .with_file(true)
                 .with_line_number(true)
-                .init();
+                .try_init();
         }
         _ => {
-            fmt()
+            let _ = fmt()
                 .with_env_filter(env_filter)
                 .with_target(true)
-                .init();
+                .try_init();
         }
     }
 
@@ -132,35 +136,30 @@ pub fn record_latency(duration_secs: f64, method: &str, path: &str) {
     .record(duration_secs);
 }
 
-/// Serve the Prometheus metrics endpoint on the given address.
+/// Serve the ops endpoints on the given address:
 ///
-/// This runs a minimal HTTP server that responds to GET requests
-/// with the current Prometheus metrics output.
-pub async fn serve_metrics(
+/// * `GET /metrics`  — Prometheus exposition
+/// * `GET /health`   — liveness (also `/healthz`)
+/// * `GET /ready`    — readiness, 503 until listeners are bound (also `/readyz`)
+pub async fn serve_ops(
     address: SocketAddr,
     handle: PrometheusHandle,
+    ready: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(address).await?;
-    info!(%address, "Metrics server listening");
+    info!(%address, "Ops server listening (/metrics /health /ready)");
 
     loop {
         let (stream, _) = listener.accept().await?;
         let handle = handle.clone();
+        let ready = ready.clone();
 
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
-            let service = hyper::service::service_fn(move |_req: Request<Incoming>| {
-                let metrics_output = handle.render();
-                async move {
-                    Ok::<_, hyper::Error>(
-                        Response::builder()
-                            .header("Content-Type", "text/plain; version=0.0.4")
-                            .body(http_body_util::Full::new(
-                                hyper::body::Bytes::from(metrics_output),
-                            ))
-                            .unwrap(),
-                    )
-                }
+            let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                let handle = handle.clone();
+                let ready = ready.clone();
+                async move { Ok::<_, hyper::Error>(ops_response(req.uri().path(), &handle, &ready)) }
             });
 
             if let Err(err) = hyper_util::server::conn::auto::Builder::new(
@@ -169,8 +168,52 @@ pub async fn serve_metrics(
             .serve_connection(io, service)
             .await
             {
-                tracing::error!(%err, "Metrics server connection error");
+                tracing::error!(%err, "Ops server connection error");
             }
         });
     }
+}
+
+fn ops_response(
+    path: &str,
+    handle: &PrometheusHandle,
+    ready: &AtomicBool,
+) -> Response<http_body_util::Full<hyper::body::Bytes>> {
+    let (status, content_type, body): (u16, &str, String) = match path {
+        "/metrics" => (
+            200,
+            "text/plain; version=0.0.4",
+            handle.render(),
+        ),
+        "/health" | "/healthz" => (
+            200,
+            "application/json",
+            format!(
+                "{{\"status\":\"ok\",\"version\":\"{}\"}}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ),
+        "/ready" | "/readyz" => {
+            if ready.load(Ordering::Relaxed) {
+                (200, "application/json", "{\"ready\":true}".to_string())
+            } else {
+                (503, "application/json", "{\"ready\":false}".to_string())
+            }
+        }
+        _ => (404, "text/plain", "not found".to_string()),
+    };
+
+    Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+        .expect("static response")
+}
+
+/// Backwards-compatible alias for the old metrics-only server.
+pub async fn serve_metrics(
+    address: SocketAddr,
+    handle: PrometheusHandle,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_ops(address, handle, Arc::new(AtomicBool::new(true))).await
 }

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
 use hyper::{Method, Request, Response};
 use serde::Serialize;
 use tracing::{debug, info};
@@ -195,7 +194,7 @@ impl CacheLayer {
     }
 
     /// Attempt to retrieve a cached response for the given request.
-    pub async fn get(&self, req: &Request<Incoming>) -> Option<Response<BoxBody>> {
+    pub async fn get<B>(&self, req: &Request<B>) -> Option<Response<BoxBody>> {
         if !self.config.enabled {
             return None;
         }
@@ -232,7 +231,7 @@ impl CacheLayer {
 
     /// Get a stale cached response for use when upstream returns an error.
     /// Called when the proxy gets an error and stale-if-error is configured.
-    pub async fn get_stale_if_error(&self, req: &Request<Incoming>) -> Option<Response<BoxBody>> {
+    pub async fn get_stale_if_error<B>(&self, req: &Request<B>) -> Option<Response<BoxBody>> {
         if !self.config.enabled || self.config.stale_if_error_secs == 0 {
             return None;
         }
@@ -251,14 +250,14 @@ impl CacheLayer {
     }
 
     /// Store a response in the cache if it is cacheable.
-    pub async fn store(&self, req: &Request<Incoming>, resp: &Response<BoxBody>) {
+    pub async fn store<B>(&self, req: &Request<B>, resp: &Response<BoxBody>) {
         self.store_with_tags(req, resp, &[]).await;
     }
 
     /// Store a response with associated tags for bulk invalidation.
-    pub async fn store_with_tags(
+    pub async fn store_with_tags<B>(
         &self,
-        req: &Request<Incoming>,
+        req: &Request<B>,
         resp: &Response<BoxBody>,
         tags: &[String],
     ) {
@@ -377,7 +376,7 @@ impl CacheLayer {
     }
 
     /// Build a cache key from the request method, URI, and relevant headers.
-    fn build_cache_key(&self, req: &Request<Incoming>) -> String {
+    fn build_cache_key<B>(&self, req: &Request<B>) -> String {
         let method = req.method().as_str();
         let uri = req.uri().to_string();
 
@@ -392,7 +391,7 @@ impl CacheLayer {
     }
 
     /// Determine if a request is eligible for caching.
-    fn is_cacheable_request(&self, req: &Request<Incoming>) -> bool {
+    fn is_cacheable_request<B>(&self, req: &Request<B>) -> bool {
         match *req.method() {
             Method::GET | Method::HEAD => true,
             Method::POST if self.config.cache_post => true,

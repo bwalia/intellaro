@@ -1,25 +1,11 @@
-//! Intellaro Ingress Controller — entry point.
+//! Intellaro Ingress Controller — standalone binary entry point.
 //!
-//! A Kubernetes-native ingress controller that watches Intellaro CRDs
-//! and reconciles them into `intellaro-http-server` configuration via
-//! the Management Control Plane (MCP) API.
-
-mod config;
-mod controller;
-mod crd;
-mod discovery;
-mod error;
-mod health;
-mod logging;
-mod mcp;
-mod metrics;
-mod reconciler;
-mod routing;
-
-use std::sync::atomic::Ordering;
+//! Kept for backwards compatibility; the unified `intellaro` binary
+//! (`intellaro --role ingress`) is the preferred way to run the platform.
 
 use clap::Parser;
-use tracing::{error, info};
+
+use intellaro_ingress::{config, crd_manifests, logging};
 
 /// Intellaro Kubernetes Ingress Controller.
 #[derive(Debug, Parser)]
@@ -58,7 +44,12 @@ async fn main() -> anyhow::Result<()> {
 
     // If --print-crds, output the CRD YAML and exit.
     if cli.print_crds {
-        print_crd_manifests();
+        for (i, crd) in crd_manifests().iter().enumerate() {
+            if i > 0 {
+                println!("---");
+            }
+            print!("{crd}");
+        }
         return Ok(());
     }
 
@@ -76,119 +67,5 @@ async fn main() -> anyhow::Result<()> {
     ctrl_config.metrics_port = cli.metrics_port;
     ctrl_config.health_port = cli.health_port;
 
-    info!(
-        mcp_url = %ctrl_config.mcp_url,
-        namespace = ?ctrl_config.namespace,
-        metrics_port = ctrl_config.metrics_port,
-        health_port = ctrl_config.health_port,
-        "Intellaro Ingress Controller starting"
-    );
-
-    // Install Prometheus metrics.
-    let metrics_handle = metrics::install_recorder();
-
-    // Health/readiness probe.
-    let ready_flag = health::new_ready_flag();
-
-    // Create Kubernetes client.
-    let kube_client = kube::Client::try_default().await?;
-
-    // Create MCP client.
-    let mcp_client = mcp::McpClient::new(
-        &ctrl_config.mcp_url,
-        ctrl_config.mcp_api_key.clone(),
-        ctrl_config.mcp_timeout_secs,
-    )?;
-
-    // Check MCP connectivity.
-    match mcp_client.health().await {
-        Ok(true) => {
-            info!("MCP server is reachable");
-            metrics::set_mcp_healthy(true);
-        }
-        _ => {
-            error!(
-                url = %ctrl_config.mcp_url,
-                "MCP server is not reachable — controller will retry"
-            );
-            metrics::set_mcp_healthy(false);
-        }
-    }
-
-    // Run an initial full reconciliation.
-    let init_ctx = reconciler::ReconcilerContext::new(
-        kube_client.clone(),
-        mcp_client.clone(),
-        ctrl_config.namespace.clone(),
-    );
-
-    match reconciler::full_reconcile(&init_ctx).await {
-        Ok(()) => {
-            info!("Initial reconciliation succeeded");
-            ready_flag.store(true, Ordering::Relaxed);
-        }
-        Err(e) => {
-            error!(error = %e, "Initial reconciliation failed — controller will retry via watches");
-        }
-    }
-
-    // Start background services.
-    let metrics_task = tokio::spawn(metrics::serve_metrics(
-        metrics_handle,
-        Some(ctrl_config.metrics_port),
-    ));
-    let health_task = tokio::spawn(health::serve_health(
-        ctrl_config.health_port,
-        ready_flag.clone(),
-    ));
-
-    // Start the CRD controllers (blocks until signal).
-    let controller_task = tokio::spawn(controller::run(
-        kube_client,
-        mcp_client,
-        ctrl_config.namespace,
-    ));
-
-    // Wait for shutdown signal.
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received shutdown signal");
-        }
-        result = controller_task => {
-            match result {
-                Ok(Ok(())) => info!("Controller exited normally"),
-                Ok(Err(e)) => error!(error = %e, "Controller exited with error"),
-                Err(e) => error!(error = %e, "Controller task panicked"),
-            }
-        }
-    }
-
-    // Clean shutdown.
-    metrics_task.abort();
-    health_task.abort();
-
-    info!("Intellaro Ingress Controller stopped");
-    Ok(())
-}
-
-/// Print CRD manifests to stdout (for `kubectl apply -f -`).
-fn print_crd_manifests() {
-    use kube::CustomResourceExt;
-
-    let crds = vec![
-        serde_yaml::to_string(&crd::IntellaroVHost::crd()).unwrap(),
-        serde_yaml::to_string(&crd::IntellaroRoute::crd()).unwrap(),
-        serde_yaml::to_string(&crd::IntellaroLBPolicy::crd()).unwrap(),
-        serde_yaml::to_string(&crd::IntellaroSecurityPolicy::crd()).unwrap(),
-        serde_yaml::to_string(&crd::IntellaroCachePolicy::crd()).unwrap(),
-        serde_yaml::to_string(&crd::IntellaroServiceDiscovery::crd()).unwrap(),
-        serde_yaml::to_string(&crd::IntellaroRoutingPolicy::crd()).unwrap(),
-    ];
-
-    for (i, crd) in crds.iter().enumerate() {
-        if i > 0 {
-            println!("---");
-        }
-        print!("{crd}");
-    }
+    intellaro_ingress::run(ctrl_config).await
 }

@@ -18,24 +18,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Copy the router library crate first (dependency of the server)
-COPY intellaro-http-router/Cargo.toml intellaro-http-router/Cargo.toml
-COPY intellaro-http-router/src/ intellaro-http-router/src/
+# Copy the workspace (context = repo root). The server is built as a
+# workspace member so the shared root Cargo.lock pins every dependency.
+COPY Cargo.toml Cargo.lock ./
+COPY intellaro-http-router/ intellaro-http-router/
+COPY intellaro-config/ intellaro-config/
+COPY intellaro-http-server/ intellaro-http-server/
+COPY intellaro-http-cli/ intellaro-http-cli/
+COPY intellaro-ingress/ intellaro-ingress/
+COPY intellaro-cli/ intellaro-cli/
 
-# Copy server manifests for dependency caching
-COPY intellaro-http-server/Cargo.toml intellaro-http-server/Cargo.toml
-COPY intellaro-http-server/Cargo.lock intellaro-http-server/Cargo.lock
-
-# Create a placeholder main to cache dependency compilation
-RUN mkdir -p intellaro-http-server/src && \
-    echo 'fn main() { println!("placeholder"); }' > intellaro-http-server/src/main.rs && \
-    cd intellaro-http-server && cargo build --release 2>/dev/null || true && \
-    rm -rf src
-
-# Copy real server source and static assets, then build
-COPY intellaro-http-server/src/ intellaro-http-server/src/
-COPY intellaro-http-server/static/ intellaro-http-server/static/
-RUN cd intellaro-http-server && touch src/main.rs && cargo build --release
+RUN cargo build --release --locked -p intellaro-http-server
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
@@ -48,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --system intellaro && \
     useradd --system --gid intellaro --create-home intellaro
 
-COPY --from=builder /build/intellaro-http-server/target/release/intellaro-http-server /usr/local/bin/intellaro-http-server
+COPY --from=builder /build/target/release/intellaro-http-server /usr/local/bin/intellaro-http-server
 COPY intellaro-http-server/static/ /usr/local/share/intellaro/static/
 
 RUN chmod +x /usr/local/bin/intellaro-http-server

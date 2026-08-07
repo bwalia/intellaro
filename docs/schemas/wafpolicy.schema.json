@@ -1,0 +1,279 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WafPolicy",
+  "description": "A security policy: IP ACLs, rate limiting, JWT auth, and WAF rules.\n\nPhase-0 enforcement covers IP ACLs, rate limiting, and JWT validation (via the in-process security engine). Signature rule packs and custom rules are schema-complete now and enforced by the Phase-3 WAF engine.",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "description": "Must be `intellaro.io/v1`.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Must be `WafPolicy`.",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/definitions/Metadata"
+    },
+    "spec": {
+      "$ref": "#/definitions/WafPolicySpec"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "HumanDuration": {
+      "description": "Human-readable duration (e.g. \"5s\", \"100ms\", \"2m 30s\") or a bare number of seconds",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "JwtAuth": {
+      "type": "object",
+      "required": [
+        "secretOrKeyPath"
+      ],
+      "properties": {
+        "audience": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secretOrKeyPath": {
+          "description": "HMAC secret, or a path to a PEM public key.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Metadata": {
+      "description": "Object metadata shared by every kind.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "labels": {
+          "description": "Free-form labels (environment, POP, team, …).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "Unique name for this object (per kind).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RateLimit": {
+      "type": "object",
+      "required": [
+        "maxRequests",
+        "window"
+      ],
+      "properties": {
+        "maxRequests": {
+          "description": "Maximum requests allowed per window.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "window": {
+          "description": "Window size.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/HumanDuration"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RulePack": {
+      "type": "string",
+      "enum": [
+        "sqli",
+        "xss",
+        "cmdi",
+        "lfi",
+        "protocol"
+      ]
+    },
+    "WafAction": {
+      "type": "string",
+      "enum": [
+        "block",
+        "monitor",
+        "allow"
+      ]
+    },
+    "WafMode": {
+      "type": "string",
+      "enum": [
+        "block",
+        "monitor"
+      ]
+    },
+    "WafPattern": {
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "default": "regex",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WafPatternType"
+            }
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WafPatternType": {
+      "type": "string",
+      "enum": [
+        "regex",
+        "string"
+      ]
+    },
+    "WafPolicySpec": {
+      "type": "object",
+      "properties": {
+        "ipAllow": {
+          "description": "CIDR allow-list. When non-empty, only these sources are admitted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ipDeny": {
+          "description": "CIDR deny-list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "jwt": {
+          "description": "JWT bearer validation.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/JwtAuth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "description": "`block` rejects offending requests; `monitor` only logs them.",
+          "default": "block",
+          "allOf": [
+            {
+              "$ref": "#/definitions/WafMode"
+            }
+          ]
+        },
+        "rateLimit": {
+          "description": "Request rate limiting.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rulePacks": {
+          "description": "Built-in signature packs to enable (Phase 3 enforcement).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RulePack"
+          }
+        },
+        "rules": {
+          "description": "Custom WAF rules (Phase 3 enforcement).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WafRule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WafRule": {
+      "type": "object",
+      "required": [
+        "id",
+        "pattern"
+      ],
+      "properties": {
+        "action": {
+          "description": "Per-rule action override; defaults to the policy mode.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WafAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Stable rule identifier (used in events and audit).",
+          "type": "string"
+        },
+        "pattern": {
+          "$ref": "#/definitions/WafPattern"
+        },
+        "targets": {
+          "description": "Request parts to inspect.",
+          "default": [
+            "all"
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WafTarget"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WafTarget": {
+      "type": "string",
+      "enum": [
+        "all",
+        "url",
+        "headers",
+        "body",
+        "args",
+        "cookies",
+        "user_agent"
+      ]
+    }
+  }
+}

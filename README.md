@@ -1,96 +1,83 @@
 # Intellaro
 
-A modular **web traffic management ecosystem** built for performance, security, and extensibility.
+A Rust-native **application delivery platform**: reverse proxy, load
+balancer, cache, security engine, and Kubernetes ingress — one data plane,
+one binary, typed configuration.
 
-## Architecture
+Intellaro is the successor to the WSLProxy (OpenResty/Lua) stack and is
+absorbing the capability surface of NGINX Plus + F5 WAF + Instance
+Manager/One Console + Ingress Controller/Gateway Fabric. Progress is tracked
+honestly in [docs/parity-matrix.md](docs/parity-matrix.md).
 
-Intellaro is composed of independent, cooperating modules:
-
-| Module                     | Description                              | Status       |
-|----------------------------|------------------------------------------|--------------|
-| `intellaro-http-server`    | Core HTTP(S) server & reverse proxy      | In Progress  |
-| `intellaro-http-cli`       | CLI tool for remote server management    | In Progress  |
-| `intellaro-ingress`        | Kubernetes-native ingress controller     | In Progress  |
-| `intellaro-ai-router`      | AI-based intelligent traffic routing     | Planned      |
-| `intellaro-monitoring`     | Observability, metrics & alerting        | Planned      |
-| `intellaro-cache-manager`  | Distributed cache orchestration          | Planned      |
-
-## Getting Started
-
-### Prerequisites
-
-- Rust 1.75+ (stable)
-- OpenSSL development headers (for TLS support)
-
-### Build
+## One binary, many roles
 
 ```bash
-cd intellaro-http-server
-cargo build --release
+intellaro --role proxy   --config examples/gateway-v1.yaml   # edge data plane
+intellaro --role all     --config config.yaml                # data plane + management API (POP mode)
+intellaro --role ingress                                     # Kubernetes ingress controller
+intellaro --role gateway                                     # Gateway API (Phase 4 — exits with roadmap pointer)
+intellaro validate --config examples/gateway-v1.yaml         # validate config, exit
+intellaro schema   --out-dir docs/schemas                    # regenerate JSON Schemas
+intellaro crds                                               # print Kubernetes CRD manifests
 ```
 
-### Run
+## Typed configuration (`intellaro.io/v1`)
+
+Configuration is data — YAML/JSON documents validated against
+[JSON Schemas](docs/schemas/) generated from the parser itself:
+
+```yaml
+apiVersion: intellaro.io/v1
+kind: Gateway
+metadata: { name: pop1-edge }
+spec:
+  listeners:
+    - { name: http, port: 8080, protocol: HTTP }
+  hosts:
+    - name: api.example.com
+      routes:
+        - match: { path: { type: Prefix, value: /api } }
+          upstreamRef: api-pool
+          timeouts: { connect: 5s, read: 30s }
+          policies: [{ ref: waf-strict }]
+```
+
+Full example: [examples/gateway-v1.yaml](examples/gateway-v1.yaml). The
+legacy flat `ServerConfig` format is still accepted everywhere.
+
+Edit the file while the server runs: routes, backends, and policies
+hot-reload atomically (last-good config is kept on parse errors). Ops
+endpoints live on `:9090` — `/metrics`, `/health`, `/ready`.
+
+## Workspace
+
+| Crate | Description |
+|-------|-------------|
+| `intellaro-cli` | The unified `intellaro` binary (roles, validate, schema, crds) |
+| `intellaro-config` | `intellaro.io/v1` typed model, validation, JSON Schema generation |
+| `intellaro-http-server` | Data-plane library + legacy standalone binary |
+| `intellaro-http-router` | Match engine, balancer strategies, canary, priority tiers |
+| `intellaro-ingress` | Kubernetes controller (CRDs → data plane via MCP API) |
+| `intellaro-http-cli` | Operator CLI for the management API |
+
+## Build & test
 
 ```bash
-cd intellaro-http-server
-cargo run -- --config config.yaml
+cargo build --release            # everything; binary at target/release/intellaro
+cargo test                       # unit + end-to-end tests (proxy, hot reload, ops)
 ```
 
-## Project Structure
+Requires Rust 1.75+. TLS is rustls — no OpenSSL needed on the request path.
 
-```
-intellaro/
-├── intellaro-http-server/         # Core Rust-based HTTP(S) server
-│   ├── Cargo.toml
-│   ├── Dockerfile
-│   ├── src/
-│   │   ├── main.rs                # Entry point
-│   │   ├── server.rs              # HTTP server setup, worker engine
-│   │   ├── proxy.rs               # Reverse proxy & load balancer
-│   │   ├── cache.rs               # Caching layer
-│   │   ├── security.rs            # Security policy engine
-│   │   ├── mcp.rs                 # MCP server & API management
-│   │   ├── logging.rs             # Logging & metrics
-│   │   ├── config.rs              # Dynamic JSON/YAML configuration
-│   │   └── cluster.rs             # Clustering & HA
-│   └── examples/
-│       └── kubernetes.yaml        # Example Kubernetes deployment
-├── intellaro-http-cli/            # CLI management tool
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs                # CLI entry point
-│       ├── client.rs              # MCP API client
-│       ├── config.rs              # Multi-profile configuration
-│       ├── output.rs              # Table/JSON/YAML output rendering
-│       ├── interactive.rs         # Interactive REPL mode
-│       └── commands/              # Subcommand modules
-├── intellaro-ingress/             # Kubernetes-native ingress controller
-│   ├── Cargo.toml
-│   ├── Dockerfile
-│   ├── src/
-│   │   ├── main.rs                # Controller entry point
-│   │   ├── controller.rs          # CRD watchers & reconciliation
-│   │   ├── reconciler.rs          # CRD → server config translation
-│   │   ├── mcp.rs                 # MCP API client
-│   │   ├── metrics.rs             # Prometheus metrics
-│   │   ├── health.rs              # Liveness & readiness probes
-│   │   └── crd/                   # Custom Resource Definitions
-│   │       ├── vhost.rs           # IntellaroVHost
-│   │       ├── route.rs           # IntellaroRoute
-│   │       ├── lb_policy.rs       # IntellaroLBPolicy
-│   │       ├── security.rs        # IntellaroSecurityPolicy
-│   │       └── cache.rs           # IntellaroCachePolicy
-│   └── manifests/
-│       ├── crds/                  # CRD YAML definitions
-│       ├── deployment.yaml        # K8s Deployment, RBAC, Service
-│       └── examples/              # Sample CRD configurations
-├── docker-compose.yml             # Local test environment
-├── docker/                        # Docker support files
-├── intellaro-ai-router/           # Future AI-based routing module
-├── intellaro-monitoring/          # Future observability & metrics module
-├── intellaro-cache-manager/       # Future cache management module
-└── README.md
-```
+## Documentation
+
+* [docs/architecture.md](docs/architecture.md) — roles, request pipeline,
+  config compile pipeline, hot-reload semantics, fail-open/fail-closed map,
+  roadmap.
+* [docs/parity-matrix.md](docs/parity-matrix.md) — WSLProxy × status and
+  NGINX Plus/F5 × status ledgers, plus known Phase-0 limitations.
+* [docs/schemas/](docs/schemas/) — JSON Schemas for `Gateway`, `Route`,
+  `Upstream`, `WafPolicy`.
 
 ## License
 

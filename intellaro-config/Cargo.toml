@@ -1,0 +1,18 @@
+[package]
+name = "intellaro-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Typed intellaro.io/v1 configuration model (Gateway, Route, Upstream, WafPolicy) with validation and JSON Schema generation"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+schemars = "0.8"
+thiserror = "2"
+humantime = "2"
+
+[dev-dependencies]
+pretty_assertions = "1"

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use ipnet::IpNet;
 use jsonwebtoken::{decode, DecodingKey, Validation};
@@ -55,9 +54,9 @@ impl SecurityEngine {
     ///
     /// Returns `Some(Response)` if the request is denied (the response is the
     /// denial response to send back). Returns `None` if the request passes.
-    pub async fn check(
+    pub async fn check<B>(
         &self,
-        req: &Request<Incoming>,
+        req: &Request<B>,
         peer_addr: SocketAddr,
     ) -> Option<Response<BoxBody>> {
         let client_ip = peer_addr.ip();
@@ -103,9 +102,9 @@ impl SecurityEngine {
     }
 
     /// Validate the JWT token in the Authorization header.
-    fn validate_jwt(
+    fn validate_jwt<B>(
         &self,
-        req: &Request<Incoming>,
+        req: &Request<B>,
         jwt_config: &JwtConfig,
     ) -> Option<Response<BoxBody>> {
         let auth_header = req
