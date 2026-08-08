@@ -7,7 +7,7 @@
 # Apply:   kubectl apply -f examples/k8s-test-domain.yaml
 # Test:    see examples/k8s-test-domain-cheatsheet.md
 #
-# The vhost answers on intellaro-test.diytaxreturn.co.uk. Point the name
+# The vhost answers on intellaro-test.fictionally.org. Point the name
 # at any cluster node (LAN: 192.168.1.140) via /etc/hosts, or use
 # curl --resolve — Host headers with :30880 match fine (ports are
 # stripped before vhost matching).
@@ -18,7 +18,7 @@ metadata:
   name: test-domain
   namespace: intellaro-demo
 spec:
-  hostname: intellaro-test.diytaxreturn.co.uk
+  hostname: intellaro-test.fictionally.org
   upstream: test-domain-backend
   lbPolicyRef: demo-lb
 ---

@@ -1,18 +1,18 @@
 # Test-domain cheatsheet (k3s1)
 
 The Intellaro data plane is exposed on **NodePort 30880** on every
-cluster node; the vhost answers on **`intellaro-test.diytaxreturn.co.uk`**.
+cluster node; the vhost answers on **`intellaro-test.fictionally.org`**.
 
 Point the domain at a LAN node — either per command:
 
 ```bash
-R="--resolve intellaro-test.diytaxreturn.co.uk:30880:192.168.1.140"
+R="--resolve intellaro-test.fictionally.org:30880:192.168.1.140"
 ```
 
 or once, for browsers too (`/etc/hosts`):
 
 ```
-192.168.1.140  intellaro-test.diytaxreturn.co.uk
+192.168.1.140  intellaro-test.fictionally.org
 ```
 
 Apply the use cases:
@@ -29,7 +29,7 @@ The echo backends reply with JSON that names the pod (`echo-a-…` /
 `echo-b-…`), so each response shows which route won.
 
 ```bash
-B=http://intellaro-test.diytaxreturn.co.uk:30880
+B=http://intellaro-test.fictionally.org:30880
 
 # 1. Default route → echo-a
 curl $R $B/
