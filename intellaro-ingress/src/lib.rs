@@ -105,6 +105,7 @@ pub async fn run(ctrl_config: config::ControllerConfig) -> anyhow::Result<()> {
         kube_client,
         mcp_client,
         ctrl_config.namespace,
+        ready_flag.clone(),
     ));
 
     // Wait for shutdown signal.

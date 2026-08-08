@@ -108,7 +108,10 @@ async fn build_routing(
         };
 
         if let Some(ref lb_ref) = spec.lb_policy_ref {
-            if let Some(lb) = find_resource::<IntellaroLBPolicy>(ctx, lb_ref).await? {
+            let vhost_ns = vhost.namespace();
+            if let Some(lb) =
+                find_resource::<IntellaroLBPolicy>(ctx, lb_ref, vhost_ns.as_deref()).await?
+            {
                 info.strategy =
                     serde_json::to_value(&lb.spec.strategy).unwrap_or(json!("round_robin"));
                 if let Some(ref hc) = lb.spec.health_check {
@@ -535,10 +538,15 @@ where
     Ok(list.items.into_iter().map(Arc::new).collect())
 }
 
-/// Find a single resource by name in the watched scope.
+/// Find a single resource by name (optionally pinned to a namespace).
+///
+/// Implemented as list-and-match: a cluster-scoped GET of a namespaced
+/// resource is not a valid Kubernetes API route (k3s answers it with a
+/// non-JSON 404), so `Api::all(...).get()` must never be used here.
 async fn find_resource<K>(
     ctx: &ReconcilerContext,
     name: &str,
+    namespace: Option<&str>,
 ) -> IngressResult<Option<Arc<K>>>
 where
     K: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
@@ -548,16 +556,14 @@ where
         + 'static,
     <K as kube::Resource>::DynamicType: Default,
 {
-    let api: Api<K> = match &ctx.namespace {
-        Some(ns) => Api::namespaced(ctx.kube_client.clone(), ns),
-        None => Api::all(ctx.kube_client.clone()),
-    };
+    let items = list_resources::<K>(ctx).await?;
+    let found = items.into_iter().find(|r| {
+        r.name_any() == name
+            && namespace.is_none_or(|ns| r.namespace().as_deref() == Some(ns))
+    });
 
-    match api.get_opt(name).await? {
-        Some(resource) => Ok(Some(Arc::new(resource))),
-        None => {
-            warn!(resource = %name, kind = %std::any::type_name::<K>(), "Referenced resource not found");
-            Ok(None)
-        }
+    if found.is_none() {
+        warn!(resource = %name, kind = %std::any::type_name::<K>(), "Referenced resource not found");
     }
+    Ok(found)
 }
