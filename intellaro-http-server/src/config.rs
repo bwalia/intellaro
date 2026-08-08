@@ -506,8 +506,19 @@ impl ConfigManager {
     }
 
     /// Apply a runtime configuration update (e.g., from the management API).
+    ///
+    /// No-op when the update is identical to the running configuration:
+    /// controllers re-push their desired state periodically, and rebuilding
+    /// the data plane for an unchanged config would needlessly reset
+    /// balancer and health state.
     pub async fn apply_update(&self, updated_config: ServerConfig) {
         let mut writer = self.inner.write().await;
+        let unchanged = serde_json::to_value(&*writer).ok()
+            == serde_json::to_value(&updated_config).ok();
+        if unchanged {
+            info!("Configuration update identical to running config — skipped");
+            return;
+        }
         *writer = updated_config;
         let _ = self.change_tx.send(());
         info!("Configuration updated via API");
