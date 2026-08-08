@@ -19,6 +19,10 @@ dataplane:
     httpPort: 8080
     opsPort: 9090
     mcpPort: 9091
+    # Fixed node port for http when type=NodePort (30000-32767).
+    httpNodePort: null
+    # Extra service annotations (e.g. external-dns hostname/target).
+    annotations: {}
 
   # Legacy flat ServerConfig (management_api is not yet part of the
   # intellaro.io/v1 schema). Override with your own config as needed.

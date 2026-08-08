@@ -537,6 +537,22 @@ fn guess_content_type(path: &std::path::Path) -> &'static str {
     }
 }
 
+
+/// Strip an optional `:port` suffix from a Host header value, tolerating
+/// IPv6 literals (`[::1]:8080` → `[::1]`).
+fn strip_host_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        if let Some(end) = host.find(']') {
+            return &host[..=end];
+        }
+        return host;
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    }
+}
+
 /// Owned request info data that can produce a borrowed `RequestInfo`.
 struct OwnedRequestInfo {
     host: Option<String>,
@@ -558,8 +574,10 @@ impl OwnedRequestInfo {
             }
         }
 
-        // Extract host
-        let host = headers.get("host").cloned();
+        // Extract host, stripping any :port suffix (RFC 9110 §7.2) so
+        // vhost rules match requests that arrive on non-default ports
+        // (NodePort, dev setups, etc.).
+        let host = headers.get("host").map(|h| strip_host_port(h).to_string());
 
         // Extract content type
         let content_type = headers.get("content-type").cloned();
@@ -606,5 +624,21 @@ impl OwnedRequestInfo {
             cookies: &self.cookies,
             content_type: self.content_type.as_deref(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_host_port;
+
+    #[test]
+    fn strips_port_from_host_header() {
+        assert_eq!(strip_host_port("example.com"), "example.com");
+        assert_eq!(strip_host_port("example.com:30880"), "example.com");
+        assert_eq!(strip_host_port("localhost:8080"), "localhost");
+        assert_eq!(strip_host_port("[::1]:8080"), "[::1]");
+        assert_eq!(strip_host_port("[2001:db8::1]"), "[2001:db8::1]");
+        // Not a port — leave untouched.
+        assert_eq!(strip_host_port("weird:host:name"), "weird:host:name");
     }
 }
