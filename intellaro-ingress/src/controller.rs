@@ -432,6 +432,14 @@ async fn update_vhost_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroVHostStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -460,6 +468,14 @@ async fn update_route_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroRouteStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -486,6 +502,14 @@ async fn update_lb_status(
     let api: Api<IntellaroLBPolicy> = Api::namespaced(ctx.kube_client.clone(), &ns);
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
 
     let status = IntellaroLBPolicyStatus {
         synced,
@@ -514,6 +538,14 @@ async fn update_security_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroSecurityPolicyStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -541,6 +573,14 @@ async fn update_cache_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroCachePolicyStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -567,6 +607,14 @@ async fn update_discovery_status(
     let api: Api<IntellaroServiceDiscovery> = Api::namespaced(ctx.kube_client.clone(), &ns);
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
 
     let status = IntellaroServiceDiscoveryStatus {
         synced,
@@ -597,6 +645,14 @@ async fn update_routing_policy_status(
     let api: Api<IntellaroRoutingPolicy> = Api::namespaced(ctx.kube_client.clone(), &ns);
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
 
     let status = IntellaroRoutingPolicyStatus {
         synced,
