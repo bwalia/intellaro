@@ -37,6 +37,7 @@ spec:
   priority: 10
 ---
 # ── Use case 2: path-based routing — /api to echo-b ──────────────────
+# Also demonstrates request/response header manipulation.
 apiVersion: ingress.intellaro.io/v1alpha1
 kind: IntellaroRoute
 metadata:
@@ -47,6 +48,11 @@ spec:
   match:
     pathPrefix: /api
   backend: { serviceName: echo-b, servicePort: 80 }
+  headers:
+    requestSet:
+      - { name: X-Injected, value: "by-intellaro" }
+    responseSet:
+      - { name: X-Powered-By, value: "intellaro" }
   priority: 100
 ---
 # ── Use case 3: exact path beats prefix — /api/version back to echo-a ─
@@ -124,3 +130,19 @@ spec:
     methods: [POST]
   backend: { serviceName: echo-b, servicePort: 80 }
   priority: 260
+---
+# ── Use case 8: path rewrite — /legacy/* is forwarded with the prefix
+# stripped (backend sees /*).
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-legacy
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathPrefix: /legacy
+  backend: { serviceName: echo-b, servicePort: 80 }
+  rewrite:
+    replacePathPrefix: ""
+  priority: 270

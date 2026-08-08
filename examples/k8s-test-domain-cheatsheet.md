@@ -89,3 +89,14 @@ kubectl -n intellaro exec deploy/intellaro-dataplane -- \
 kubectl -n intellaro exec deploy/intellaro-dataplane -- curl -s http://localhost:9090/health
 kubectl -n intellaro exec deploy/intellaro-dataplane -- curl -s http://localhost:9090/metrics | grep proxy_
 ```
+
+## Phase-1 additions
+
+```bash
+# 8. Path rewrite: backend sees the path with /legacy stripped
+curl -s $R $B/legacy/users | python3 -c "import sys,json; print(json.load(sys.stdin)['path'])"   # -> /users
+
+# 9. Header manipulation on /api: request gets X-Injected, response gets X-Powered-By
+curl -s -D- -o /dev/null $R $B/api/users | grep -i x-powered-by
+curl -s $R $B/api/users | python3 -m json.tool | grep -i x-injected
+```
