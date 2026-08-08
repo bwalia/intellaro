@@ -1,0 +1,24 @@
+[Unit]
+Description=Intellaro Application Delivery Platform (single-binary POP mode)
+Documentation=https://github.com/bwalia/intellaro
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=intellaro
+Group=intellaro
+ExecStart=/opt/intellaro/bin/intellaro --role all --config /etc/intellaro/config.yaml
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+# Allow binding <1024 if the POP ever takes 80/443
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
