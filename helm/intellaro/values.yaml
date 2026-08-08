@@ -2,6 +2,9 @@ image:
   repository: int-spectoncr.diytaxreturn.co.uk/intellaro/intellaro
   tag: latest
   pullPolicy: Always
+  # Name of an existing kubernetes.io/dockerconfigjson secret for pulls.
+  pullSecret: ""
+
 
 # ── Data plane: `intellaro --role all` ────────────────────────────────
 # Reverse proxy (8080) + ops endpoints (9090: /metrics /health /ready)

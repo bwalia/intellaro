@@ -19,6 +19,10 @@ spec:
         {{- include "intellaro.labels" . | nindent 8 }}
         app.kubernetes.io/component: ingress-controller
     spec:
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
       serviceAccountName: {{ include "intellaro.serviceAccountName" . }}
       containers:
         - name: intellaro-ingress

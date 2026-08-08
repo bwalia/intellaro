@@ -25,6 +25,9 @@ serde_yaml = "0.9"
 # HTTP client (for MCP API calls)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
+# Explicit CryptoProvider selection (see lib.rs run())
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+
 # Schema
 schemars = "0.8"
 

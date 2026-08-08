@@ -31,6 +31,11 @@ pub struct RunOptions {
 
 /// Load configuration, start every subsystem, and serve until Ctrl+C.
 pub async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Pin the process-level rustls CryptoProvider: when embedded in the
+    // unified binary, both `ring` and `aws-lc-rs` backends are compiled in
+    // and rustls refuses to choose one automatically.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let config_manager = ConfigManager::load(&options.config_path)
         .map_err(|err| format!("failed to load configuration: {err}"))?;
 

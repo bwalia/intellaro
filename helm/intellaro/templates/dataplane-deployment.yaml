@@ -21,6 +21,10 @@ spec:
       annotations:
         checksum/config: {{ .Values.dataplane.config | sha256sum }}
     spec:
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
       containers:
         - name: intellaro
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
