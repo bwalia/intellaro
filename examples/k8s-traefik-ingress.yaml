@@ -7,9 +7,12 @@
 # vhost for the same hostname (chained-ingress / migration topology).
 #
 # Apply:  kubectl apply -f examples/k8s-traefik-ingress.yaml
-# Test:   curl --resolve intellaro-pop.fictionally.org:80:192.168.1.140 \
+# Test:   https://intellaro-pop.fictionally.org/   (public DNS is live:
+#         Cloudflare -> pop0.wslproxy.com edge (TLS, force-HTTPS)
+#         -> k3s1 traefik -> intellaro -> backends)
+#   LAN shortcut without the edge hop:
+#         curl --resolve intellaro-pop.fictionally.org:80:192.168.1.140 \
 #              http://intellaro-pop.fictionally.org/
-#   (or /etc/hosts: 192.168.1.140 intellaro-pop.fictionally.org)
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
