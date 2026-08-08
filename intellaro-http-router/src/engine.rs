@@ -53,8 +53,27 @@ pub struct RoutingDecision {
     /// Per-rule timeout override (seconds).
     pub timeout_secs: Option<u64>,
 
+    /// Path prefix to strip before forwarding (rule-level rewrite).
+    pub strip_path_prefix: Option<String>,
+
+    /// Replacement for the stripped prefix (defaults to empty).
+    pub rewrite_prefix_with: Option<String>,
+
     /// Opaque reference to the backend state (for recording latency/errors).
     pub backend_state: Arc<BackendState>,
+}
+
+/// Outcome of routing a request: forward to a backend, or answer
+/// directly with a static page / redirect (WSLProxy response-code
+/// parity: 200/403 static, 301/302 redirect, absent action = proxy).
+#[derive(Debug, Clone)]
+pub enum RouteOutcome {
+    Forward(RoutingDecision),
+    Respond {
+        rule_name: String,
+        action: crate::config::RuleAction,
+        header_manipulation: Option<HeaderManipulation>,
+    },
 }
 
 /// Errors from the routing engine.
@@ -93,7 +112,7 @@ impl RoutingEngine {
         request: &RequestInfo<'_>,
         jwt_claims: Option<&HashMap<String, String>>,
         source_ip: Option<&str>,
-    ) -> Result<RoutingDecision, RoutingError> {
+    ) -> Result<RouteOutcome, RoutingError> {
         let start = Instant::now();
 
         // ── Step 1: Priority/SLA tier identification ────────────────────
@@ -118,18 +137,20 @@ impl RoutingEngine {
         // If the priority tier has a dedicated backend, use that directly.
         if let Some(ref pr) = priority_result {
             if let Some(ref dedicated) = pr.dedicated_backend {
-                return self.select_from_group(
-                    dedicated,
-                    "priority_dedicated",
-                    priority_result.as_ref().map(|p| p.tier_name.as_str()),
-                    false,
-                    None,
-                    None,
-                    None,
-                    None,
-                    source_ip,
-                    start,
-                );
+                return self
+                    .select_from_group(
+                        dedicated,
+                        "priority_dedicated",
+                        priority_result.as_ref().map(|p| p.tier_name.as_str()),
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                        source_ip,
+                        start,
+                    )
+                    .map(RouteOutcome::Forward);
             }
         }
 
@@ -151,18 +172,20 @@ impl RoutingEngine {
 
             // If the classifier mapped this to a backend group, use it.
             if let Some(ref target_group) = cl.target_group {
-                return self.select_from_group(
-                    target_group,
-                    &format!("ai_classifier:{}", cl.class),
-                    priority_result.as_ref().map(|p| p.tier_name.as_str()),
-                    false,
-                    None,
-                    Some(cl.class.clone()),
-                    None,
-                    None,
-                    source_ip,
-                    start,
-                );
+                return self
+                    .select_from_group(
+                        target_group,
+                        &format!("ai_classifier:{}", cl.class),
+                        priority_result.as_ref().map(|p| p.tier_name.as_str()),
+                        false,
+                        None,
+                        Some(cl.class.clone()),
+                        None,
+                        None,
+                        source_ip,
+                        start,
+                    )
+                    .map(RouteOutcome::Forward);
             }
         }
 
@@ -190,18 +213,35 @@ impl RoutingEngine {
         // Drop the read lock before doing further work.
         drop(matchers);
 
-        // Look up header manipulation and timeout from config.
-        let (header_manipulation, timeout_secs) = {
+        // Look up header manipulation, timeout, action, and rewrite config.
+        let (header_manipulation, timeout_secs, action, strip_path_prefix, rewrite_prefix_with) = {
             let config = self.state.config.read().expect("config lock poisoned");
             let rule = config
                 .rules
                 .iter()
                 .find(|r| r.name == rule_name);
             match rule {
-                Some(r) => (r.headers.clone(), r.timeout_secs),
-                None => (header_manipulation, timeout_secs),
+                Some(r) => (
+                    r.headers.clone(),
+                    r.timeout_secs,
+                    r.action.clone(),
+                    r.strip_path_prefix.clone(),
+                    r.rewrite_prefix_with.clone(),
+                ),
+                None => (header_manipulation, timeout_secs, None, None, None),
             }
         };
+
+        // Static/redirect rules answer directly — no backend involved.
+        if let Some(action) = action {
+            route_metrics::record_route_decision(&rule_name, "_direct", "_action");
+            route_metrics::record_decision_latency(start);
+            return Ok(RouteOutcome::Respond {
+                rule_name,
+                action,
+                header_manipulation,
+            });
+        }
 
         // ── Step 4: Canary check ──────────────────────────────────────
         let canary_deployment = self
@@ -214,18 +254,24 @@ impl RoutingEngine {
             route_metrics::record_canary_decision(&deployment.name, is_canary);
             route_metrics::set_canary_weight(&deployment.name, deployment.current_weight());
 
-            return self.select_from_group(
-                target_group,
-                &rule_name,
-                priority_result.as_ref().map(|p| p.tier_name.as_str()),
-                is_canary,
-                Some(deployment.name.clone()),
-                classification.as_ref().map(|c| c.class.clone()),
-                header_manipulation,
-                timeout_secs,
-                source_ip,
-                start,
-            );
+            return self
+                .select_from_group(
+                    target_group,
+                    &rule_name,
+                    priority_result.as_ref().map(|p| p.tier_name.as_str()),
+                    is_canary,
+                    Some(deployment.name.clone()),
+                    classification.as_ref().map(|c| c.class.clone()),
+                    header_manipulation,
+                    timeout_secs,
+                    source_ip,
+                    start,
+                )
+                .map(|mut d| {
+                    d.strip_path_prefix = strip_path_prefix;
+                    d.rewrite_prefix_with = rewrite_prefix_with;
+                    RouteOutcome::Forward(d)
+                });
         }
 
         // ── Step 5: Anomaly check on the target group ─────────────────
@@ -244,6 +290,11 @@ impl RoutingEngine {
             source_ip,
             start,
         )
+        .map(|mut d| {
+            d.strip_path_prefix = strip_path_prefix;
+            d.rewrite_prefix_with = rewrite_prefix_with;
+            RouteOutcome::Forward(d)
+        })
     }
 
     /// Select a backend from a named group, applying AI prediction if enabled.
@@ -283,6 +334,8 @@ impl RoutingEngine {
                     classification,
                     header_manipulation,
                     timeout_secs,
+                    strip_path_prefix: None,
+                    rewrite_prefix_with: None,
                     backend_state: backend,
                 });
             }
@@ -316,6 +369,8 @@ impl RoutingEngine {
             classification,
             header_manipulation,
             timeout_secs,
+            strip_path_prefix: None,
+            rewrite_prefix_with: None,
             backend_state: backend,
         })
     }

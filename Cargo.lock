@@ -1372,6 +1372,7 @@ dependencies = [
 name = "intellaro-config"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "humantime",
  "pretty_assertions",
  "schemars",
@@ -1413,6 +1414,7 @@ dependencies = [
  "ahash",
  "chrono",
  "dashmap",
+ "ipnet",
  "metrics",
  "rand 0.9.5",
  "regex",
@@ -1427,6 +1429,7 @@ dependencies = [
 name = "intellaro-http-server"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "clap",
  "dashmap",

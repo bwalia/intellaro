@@ -13,16 +13,17 @@ use hyper::body::{Bytes, Incoming};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use intellaro_http_router::config::HeaderManipulation;
 use intellaro_http_router::engine::RoutingError;
 use intellaro_http_router::matcher::RequestInfo;
-use intellaro_http_router::RoutingEngine;
+use intellaro_http_router::{RouteOutcome, RoutingEngine, RuleAction};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::cache::CacheLayer;
 use crate::circuit_breaker::{self, CircuitBreakerRegistry};
-use crate::config::{ConfigManager, ListenerConfig, StaticRootConfig};
+use crate::config::{ConfigManager, FallbackConfig, ListenerConfig, StaticRootConfig};
 use crate::logging;
 use crate::proxy::ProxyEngine;
 use crate::security::SecurityEngine;
@@ -42,6 +43,7 @@ pub struct AppState {
     pub static_roots: Vec<StaticRootConfig>,
     pub routing_engine: Option<RoutingEngine>,
     pub circuit_breakers: CircuitBreakerRegistry,
+    pub fallback: FallbackConfig,
 }
 
 /// Start the HTTP server with all configured listeners.
@@ -141,6 +143,7 @@ fn build_app_state(
         static_roots: config.static_roots.clone(),
         routing_engine,
         circuit_breakers,
+        fallback: config.fallback.clone(),
     })
 }
 
@@ -158,15 +161,20 @@ async fn spawn_listener(
         "Listener bound"
     );
 
+    let scheme: &'static str = if listener_config.tls.is_some() { "https" } else { "http" };
     let handle = tokio::spawn(async move {
-        accept_loop(tcp_listener, state_rx).await;
+        accept_loop(tcp_listener, state_rx, scheme).await;
     });
 
     Ok(handle)
 }
 
 /// Core accept loop — accepts TCP connections and spawns a task per connection.
-async fn accept_loop(listener: TcpListener, state_rx: watch::Receiver<Arc<AppState>>) {
+async fn accept_loop(
+    listener: TcpListener,
+    state_rx: watch::Receiver<Arc<AppState>>,
+    scheme: &'static str,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
@@ -174,7 +182,7 @@ async fn accept_loop(listener: TcpListener, state_rx: watch::Receiver<Arc<AppSta
                 metrics::gauge!("active_connections").increment(1.0);
 
                 tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, peer_addr, state_rx).await {
+                    if let Err(err) = handle_connection(stream, peer_addr, state_rx, scheme).await {
                         warn!(%peer_addr, %err, "Connection error");
                     }
                     metrics::gauge!("active_connections").decrement(1.0);
@@ -195,13 +203,14 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
     state_rx: watch::Receiver<Arc<AppState>>,
+    scheme: &'static str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let io = TokioIo::new(stream);
 
     let service = hyper::service::service_fn(move |req: Request<Incoming>| {
         let state = state_rx.borrow().clone();
         let addr = peer_addr;
-        async move { handle_request(req, addr, state).await }
+        async move { handle_request(req, addr, state, scheme).await }
     });
 
     ConnectionBuilder::new(TokioExecutor::new())
@@ -216,6 +225,7 @@ async fn handle_request(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
     state: Arc<AppState>,
+    scheme: &'static str,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -280,12 +290,27 @@ async fn handle_request(
 
     // 4. Intelligent routing engine (if configured)
     if let Some(ref engine) = state.routing_engine {
-        let owned_info = OwnedRequestInfo::from_request(req);
+        let owned_info = OwnedRequestInfo::from_request(req, peer_addr.ip().to_string());
         let request_info = owned_info.as_request_info();
         let source_ip = peer_addr.ip().to_string();
 
         match engine.route(&request_info, None, Some(&source_ip)) {
-            Ok(decision) => {
+            // Direct response: static page or redirect — no backend.
+            Ok(RouteOutcome::Respond {
+                rule_name,
+                action,
+                header_manipulation,
+            }) => {
+                debug!(rule = %rule_name, "Routing engine direct-response action");
+                let mut response = build_action_response(&action);
+                apply_response_headers(&mut response, header_manipulation.as_ref());
+                let status = response.status().as_u16();
+                logging::record_response(status, &method);
+                logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+                return Ok(response);
+            }
+
+            Ok(RouteOutcome::Forward(decision)) => {
                 let route_start = std::time::Instant::now();
                 debug!(
                     rule = %decision.matched_rule,
@@ -295,15 +320,27 @@ async fn handle_request(
                     "Routing engine decision"
                 );
 
+                let opts = crate::proxy::ForwardOptions {
+                    client_addr: peer_addr,
+                    scheme,
+                    path_override: rewrite_path(
+                        req.uri(),
+                        decision.strip_path_prefix.as_deref(),
+                        decision.rewrite_prefix_with.as_deref(),
+                    ),
+                    headers: decision.header_manipulation.clone(),
+                };
+
                 let response = match state
                     .proxy_engine
-                    .forward_to(req, &decision.backend_id, body_bytes.clone(), peer_addr)
+                    .forward_to(req, &decision.backend_id, body_bytes.clone(), &opts)
                     .await
                 {
-                    Ok(resp) => {
+                    Ok(mut resp) => {
                         let latency_ms = route_start.elapsed().as_secs_f64() * 1000.0;
                         engine.record_backend_latency(&decision.backend_id, latency_ms);
                         engine.release_backend(&decision.backend_state);
+                        apply_response_headers(&mut resp, decision.header_manipulation.as_ref());
                         resp
                     }
                     Err(err) => {
@@ -330,7 +367,15 @@ async fn handle_request(
                 return Ok(response);
             }
             Err(RoutingError::NoMatchingRule) => {
-                // Fall through to default proxy behavior
+                // WSLProxy `no_server`/`no_rule` parity: configurable
+                // fallback page instead of proxying to the first upstream.
+                if state.fallback.mode == "not_found" {
+                    debug!(%path, "No routing rule matched — serving fallback page");
+                    let response = fallback_response(&state.fallback);
+                    logging::record_response(response.status().as_u16(), &method);
+                    logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
+                    return Ok(response);
+                }
                 debug!(%path, "No routing rule matched, falling back to default proxy");
             }
             Err(err) => {
@@ -387,10 +432,17 @@ async fn handle_request(
 
     let mut last_response = None;
 
+    let fwd_opts = crate::proxy::ForwardOptions {
+        client_addr: peer_addr,
+        scheme,
+        path_override: None,
+        headers: None,
+    };
+
     for attempt in 0..max_attempts {
         match state
             .proxy_engine
-            .forward(req, body_bytes.clone(), peer_addr)
+            .forward(req, body_bytes.clone(), &fwd_opts)
             .await
         {
             Ok(resp) => {
@@ -538,6 +590,114 @@ fn guess_content_type(path: &std::path::Path) -> &'static str {
 }
 
 
+/// Build the response for a direct rule action (static page or redirect).
+fn build_action_response(action: &RuleAction) -> Response<BoxBody> {
+    match action {
+        RuleAction::Static {
+            status,
+            body,
+            content_type,
+        } => {
+            let status = StatusCode::from_u16(*status).unwrap_or(StatusCode::OK);
+            Response::builder()
+                .status(status)
+                .header(
+                    "Content-Type",
+                    content_type.as_deref().unwrap_or("text/html; charset=utf-8"),
+                )
+                .body(BoxBody::new(Bytes::from(body.clone().unwrap_or_default())))
+                .unwrap_or_else(|_| internal_error_response())
+        }
+        RuleAction::Redirect { location, status } => {
+            let status = StatusCode::from_u16(*status).unwrap_or(StatusCode::FOUND);
+            Response::builder()
+                .status(status)
+                .header("Location", location.as_str())
+                .body(BoxBody::new(Bytes::new()))
+                .unwrap_or_else(|_| internal_error_response())
+        }
+    }
+}
+
+fn internal_error_response() -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(BoxBody::new(Bytes::from("Internal Server Error")))
+        .expect("static response")
+}
+
+/// The configurable fallback page for requests no rule matches
+/// (WSLProxy `no_server` / `no_rule` parity).
+fn fallback_response(fallback: &FallbackConfig) -> Response<BoxBody> {
+    let status = StatusCode::from_u16(fallback.status).unwrap_or(StatusCode::NOT_FOUND);
+    let body = fallback.body.clone().unwrap_or_else(|| {
+        format!(
+            "<html><head><title>{s}</title></head><body><center><h1>{s}</h1></center>\
+             <hr><center>intellaro</center></body></html>",
+            s = status
+        )
+    });
+    Response::builder()
+        .status(status)
+        .header("Content-Type", fallback.content_type.as_str())
+        .body(BoxBody::new(Bytes::from(body)))
+        .unwrap_or_else(|_| internal_error_response())
+}
+
+/// Apply rule-level response header manipulation.
+fn apply_response_headers(resp: &mut Response<BoxBody>, hm: Option<&HeaderManipulation>) {
+    let Some(hm) = hm else { return };
+    for (name, value) in &hm.response_set {
+        if let (Ok(n), Ok(v)) = (
+            hyper::header::HeaderName::try_from(name.as_str()),
+            hyper::header::HeaderValue::try_from(value.as_str()),
+        ) {
+            resp.headers_mut().insert(n, v);
+        }
+    }
+    for name in &hm.response_remove {
+        if let Ok(n) = hyper::header::HeaderName::try_from(name.as_str()) {
+            resp.headers_mut().remove(n);
+        }
+    }
+}
+
+/// Compute the upstream path when a rule strips/replaces the matched
+/// prefix. Returns None when the request path is unaffected.
+fn rewrite_path(
+    uri: &hyper::Uri,
+    strip_prefix: Option<&str>,
+    replace_with: Option<&str>,
+) -> Option<String> {
+    let strip = strip_prefix?;
+    let path = uri.path();
+    let rest = path.strip_prefix(strip)?;
+
+    let mut new_path = String::from(replace_with.unwrap_or(""));
+    if !new_path.starts_with('/') {
+        new_path.insert(0, '/');
+    }
+    if !rest.is_empty() {
+        if new_path.ends_with('/') && rest.starts_with('/') {
+            new_path.pop();
+        } else if !new_path.ends_with('/') && !rest.starts_with('/') && new_path != "/" {
+            new_path.push('/');
+        }
+        if new_path == "/" && rest.starts_with('/') {
+            new_path.pop();
+        }
+        new_path.push_str(rest);
+    }
+    if new_path.is_empty() {
+        new_path.push('/');
+    }
+    if let Some(q) = uri.query() {
+        new_path.push('?');
+        new_path.push_str(q);
+    }
+    Some(new_path)
+}
+
 /// Strip an optional `:port` suffix from a Host header value, tolerating
 /// IPv6 literals (`[::1]:8080` → `[::1]`).
 fn strip_host_port(host: &str) -> &str {
@@ -562,10 +722,11 @@ struct OwnedRequestInfo {
     query_params: HashMap<String, String>,
     cookies: HashMap<String, String>,
     content_type: Option<String>,
+    source_ip: String,
 }
 
 impl OwnedRequestInfo {
-    fn from_request<B>(req: &Request<B>) -> Self {
+    fn from_request<B>(req: &Request<B>, source_ip: String) -> Self {
         // Extract headers
         let mut headers = HashMap::new();
         for (key, value) in req.headers().iter() {
@@ -611,6 +772,7 @@ impl OwnedRequestInfo {
             query_params,
             cookies,
             content_type,
+            source_ip,
         }
     }
 
@@ -623,13 +785,34 @@ impl OwnedRequestInfo {
             query_params: &self.query_params,
             cookies: &self.cookies,
             content_type: self.content_type.as_deref(),
+            source_ip: Some(&self.source_ip),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_host_port;
+    use super::{rewrite_path, strip_host_port};
+
+    #[test]
+    fn rewrites_paths() {
+        let uri: hyper::Uri = "/api/v1/users?limit=5".parse().unwrap();
+        assert_eq!(
+            rewrite_path(&uri, Some("/api"), None).as_deref(),
+            Some("/v1/users?limit=5")
+        );
+        assert_eq!(
+            rewrite_path(&uri, Some("/api"), Some("/internal")).as_deref(),
+            Some("/internal/v1/users?limit=5")
+        );
+        // Prefix not present — no rewrite.
+        assert_eq!(rewrite_path(&uri, Some("/other"), None), None);
+        // No strip configured — no rewrite.
+        assert_eq!(rewrite_path(&uri, None, None), None);
+        // Stripping the entire path yields "/".
+        let uri: hyper::Uri = "/legacy".parse().unwrap();
+        assert_eq!(rewrite_path(&uri, Some("/legacy"), None).as_deref(), Some("/"));
+    }
 
     #[test]
     fn strips_port_from_host_header() {

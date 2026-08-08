@@ -18,17 +18,17 @@ accepted, enforcement pending (never silently dropped — compile warns) ·
 | Rule match: path (`starts_with`/`equals`/regex) | ✅ | `Prefix` / `Exact` / `Regex` path matches |
 | Deterministic selection (priority > specificity) | ✅ | Exact > longer Prefix > Regex; explicit `priority` override |
 | Rule match: method / header conditions | ✅ | `match.methods`, `match.headers` |
-| Rule match: IP/CIDR, country/GeoIP | 🟡 | IP allow/deny via WafPolicy (global); per-rule IP + GeoIP ❌ Phase 1 |
+| Rule match: IP/CIDR, country/GeoIP | 🟡 | Per-rule `sourceCidrs` ✅ (v1 + CRD); global IP allow/deny via WafPolicy ✅; GeoIP ❌ Phase 1 |
 | Rule match: JWT (cookie/header), cookie KV | 🟡 | JWT bearer validation global; per-rule conditions ❌ Phase 1 |
-| Response actions 200/403 static, 301/302, 305 proxy | 🟡 | Proxy (305-equivalent) ✅; static/redirect actions ❌ Phase 1 |
+| Response actions 200/403 static, 301/302, 305 proxy | ✅ | Per-rule `action`: static pages (incl. base64 bodies, custom status/content-type) and 301/302/303/307/308 redirects; absent = proxy |
 | 306 CAPTCHA challenge (+`/__captcha/verify`) | ❌ | Phase 1 |
 | Per-server proxy timeouts (connect/send/read) | 🟡 | Schema ✅; `read` enforced per route; connect/send are client-level (5 s/30 s) until the streaming rewrite |
-| Custom request/response headers | 🟡 | Router supports `HeaderManipulation`; not yet exposed in v1 schema |
-| Strip path / auto-HTTPS redirect | ❌ | Phase 1 |
+| Custom request/response headers | ✅ | `requestHeaders`/`responseHeaders` set+remove in v1 and IntellaroRoute `headers`, applied on the proxy path |
+| Strip path / auto-HTTPS redirect | 🟡 | `rewrite.stripPrefix`/`replaceWith` ✅ (also IntellaroRoute `replacePathPrefix`); listener-level force-HTTPS ❌ Phase 1 (expressible per-route via redirect action) |
 | Consul SRV + resolver fallback | ❌ | Phase 1 (DNS names in backend addresses resolve via system resolver) |
 | TCP stream proxy (k3s-style L4) | ❌ | Phase 2 (`adp-stream`) |
 | Unix socket backends, S3 SigV4 signing, LLM translate, MCP gateway | ❌ | Phase 1–3 (inventory §2.10) |
-| Fallback branded pages (`no_server`, `no_rule`) | ❌ | Phase 1 |
+| Fallback branded pages (`no_server`, `no_rule`) | ✅ | Gateway `fallback` page (custom status/body) served when no rule matches; legacy first-upstream fallback remains opt-in |
 
 ### Traffic routing
 
@@ -147,6 +147,7 @@ accepted, enforcement pending (never silently dropped — compile warns) ·
    responses buffered; no WebSocket/SSE/gRPC streaming. First Phase 1 item.
 2. **Host header** — upstream sees the backend host; the original host
    arrives as `X-Forwarded-Host` until the streaming rewrite.
+   (`X-Forwarded-Proto` is stamped per listener, chained-proxy safe.)
 3. **Global security policy** — the first referenced `WafPolicy` applies
    process-wide; per-route binding lands with the Phase 3 WAF engine.
 4. **Listener changes need a restart**; everything else hot-reloads.

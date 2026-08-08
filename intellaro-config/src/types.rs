@@ -154,6 +154,32 @@ pub struct GatewaySpec {
 
     /// Virtual hosts served by this gateway.
     pub hosts: Vec<Host>,
+
+    /// Page served when no route matches (WSLProxy `no_server` parity).
+    /// Omitted = requests fall through to the default proxy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackPage>,
+}
+
+/// Branded fallback page for unmatched requests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FallbackPage {
+    #[serde(default = "default_fallback_status")]
+    pub status: u16,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+
+    #[serde(default = "default_fallback_content_type")]
+    pub content_type: String,
+}
+
+fn default_fallback_status() -> u16 {
+    404
+}
+fn default_fallback_content_type() -> String {
+    "text/html; charset=utf-8".to_string()
 }
 
 /// A listening socket.
@@ -286,6 +312,79 @@ pub struct Route {
     /// derived from path specificity (Exact > longer Prefix > Regex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+
+    /// Direct response action (static page or redirect) instead of
+    /// proxying. WSLProxy response-code parity: 200/403 static,
+    /// 301/302 redirect; omitted = proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<RouteAction>,
+
+    /// Path rewrite applied before forwarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<RouteRewrite>,
+
+    /// Headers to set/remove on the proxied request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_headers: Option<HeaderOps>,
+
+    /// Headers to set/remove on the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<HeaderOps>,
+}
+
+/// Direct response action for a route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum RouteAction {
+    /// Serve a static response (block/landing pages).
+    Static {
+        #[serde(default = "default_action_status")]
+        status: u16,
+        /// Plain text/HTML body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        /// Base64-encoded body (WSLProxy stored pages this way).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_base64: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+    },
+    /// Redirect to a location (301/302/303/307/308).
+    Redirect {
+        location: String,
+        #[serde(default = "default_redirect_status")]
+        status: u16,
+    },
+}
+
+fn default_action_status() -> u16 {
+    200
+}
+fn default_redirect_status() -> u16 {
+    302
+}
+
+/// Path rewrite: strip a prefix and optionally replace it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RouteRewrite {
+    /// Prefix to strip from the request path (usually the matched prefix).
+    pub strip_prefix: String,
+
+    /// Replacement for the stripped prefix (defaults to empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_with: Option<String>,
+}
+
+/// Header set/remove operations.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeaderOps {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -302,6 +401,10 @@ pub struct RouteMatch {
     /// Header equality conditions (all must match).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+
+    /// Client source IPs/CIDRs to match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_cidrs: Vec<String>,
 }
 
 impl Default for RouteMatch {
@@ -310,6 +413,7 @@ impl Default for RouteMatch {
             path: PathMatch::default(),
             methods: Vec::new(),
             headers: BTreeMap::new(),
+            source_cidrs: Vec::new(),
         }
     }
 }

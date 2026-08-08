@@ -33,6 +33,7 @@ pub struct CompiledMatcher {
     query_params: Vec<(String, String)>,
     cookies: Vec<(String, String)>,
     content_type: Option<String>,
+    source_cidrs: Vec<ipnet::IpNet>,
 }
 
 /// Host matching mode.
@@ -61,6 +62,8 @@ pub struct RequestInfo<'a> {
     pub query_params: &'a HashMap<String, String>,
     pub cookies: &'a HashMap<String, String>,
     pub content_type: Option<&'a str>,
+    /// Client source IP (for CIDR match conditions).
+    pub source_ip: Option<&'a str>,
 }
 
 impl CompiledMatcher {
@@ -117,6 +120,18 @@ impl CompiledMatcher {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
+        // Bare IPs are accepted as /32 (v4) or /128 (v6).
+        let mut source_cidrs = Vec::new();
+        for cidr in &config.source_cidrs {
+            let net: ipnet::IpNet = cidr
+                .parse()
+                .or_else(|_| cidr.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| {
+                    MatcherError::InvalidCidr(format!("Rule '{rule_name}': {cidr:?}"))
+                })?;
+            source_cidrs.push(net);
+        }
+
         Ok(Self {
             rule_name: rule_name.to_string(),
             priority,
@@ -129,6 +144,7 @@ impl CompiledMatcher {
             query_params,
             cookies,
             content_type: config.content_type.clone(),
+            source_cidrs,
         })
     }
 
@@ -212,6 +228,17 @@ impl CompiledMatcher {
             }
         }
 
+        // Source IP CIDR match.
+        if !self.source_cidrs.is_empty() {
+            let Some(ip) = req.source_ip.and_then(|s| s.parse::<std::net::IpAddr>().ok())
+            else {
+                return false;
+            };
+            if !self.source_cidrs.iter().any(|net| net.contains(&ip)) {
+                return false;
+            }
+        }
+
         debug!(rule = %self.rule_name, "Request matched routing rule");
         true
     }
@@ -222,6 +249,9 @@ impl CompiledMatcher {
 pub enum MatcherError {
     #[error("Invalid regex pattern: {0}")]
     InvalidRegex(String),
+
+    #[error("Invalid CIDR: {0}")]
+    InvalidCidr(String),
 }
 
 /// Find the first matching rule for a request from a sorted list of matchers.
@@ -232,4 +262,69 @@ pub fn find_match<'a>(
     req: &RequestInfo<'_>,
 ) -> Option<&'a CompiledMatcher> {
     matchers.iter().find(|m| m.matches(req))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::MatchConfig;
+
+    fn req<'a>(
+        maps: &'a (HashMap<String, String>, HashMap<String, String>, HashMap<String, String>),
+        source_ip: Option<&'a str>,
+    ) -> RequestInfo<'a> {
+        RequestInfo {
+            host: Some("example.com"),
+            path: "/x",
+            method: "GET",
+            headers: &maps.0,
+            query_params: &maps.1,
+            cookies: &maps.2,
+            content_type: None,
+            source_ip,
+        }
+    }
+
+    #[test]
+    fn source_cidr_matching() {
+        let config = MatchConfig {
+            host: None,
+            path_prefix: None,
+            path_exact: None,
+            path_regex: None,
+            methods: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            cookies: HashMap::new(),
+            content_type: None,
+            source_cidrs: vec!["10.0.0.0/8".into(), "192.0.2.7".into()],
+        };
+        let matcher = CompiledMatcher::compile("t", 100, "g", 0, &config).unwrap();
+        let maps = (HashMap::new(), HashMap::new(), HashMap::new());
+
+        assert!(matcher.matches(&req(&maps, Some("10.1.2.3"))));
+        assert!(matcher.matches(&req(&maps, Some("192.0.2.7"))));
+        assert!(!matcher.matches(&req(&maps, Some("203.0.113.9"))));
+        assert!(!matcher.matches(&req(&maps, None)));
+    }
+
+    #[test]
+    fn invalid_cidr_is_a_compile_error() {
+        let config = MatchConfig {
+            host: None,
+            path_prefix: None,
+            path_exact: None,
+            path_regex: None,
+            methods: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            cookies: HashMap::new(),
+            content_type: None,
+            source_cidrs: vec!["not-a-cidr".into()],
+        };
+        assert!(matches!(
+            CompiledMatcher::compile("t", 100, "g", 0, &config),
+            Err(MatcherError::InvalidCidr(_))
+        ));
+    }
 }

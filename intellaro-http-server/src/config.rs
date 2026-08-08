@@ -59,6 +59,52 @@ pub struct ServerConfig {
     /// Multi-tenancy configuration.
     #[serde(default)]
     pub tenants: Vec<crate::tenant::TenantConfig>,
+
+    /// Behavior when no routing rule matches a request.
+    #[serde(default)]
+    pub fallback: FallbackConfig,
+}
+
+/// Behavior for requests that match no routing rule
+/// (WSLProxy `no_server` / `no_rule` parity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackConfig {
+    /// "first_upstream" (legacy behavior: proxy to the first upstream)
+    /// or "not_found" (serve the fallback page below).
+    #[serde(default = "default_fallback_mode")]
+    pub mode: String,
+
+    /// Status code for the fallback page.
+    #[serde(default = "default_fallback_status")]
+    pub status: u16,
+
+    /// Custom page body; a minimal branded page when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+
+    #[serde(default = "default_fallback_content_type")]
+    pub content_type: String,
+}
+
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_fallback_mode(),
+            status: default_fallback_status(),
+            body: None,
+            content_type: default_fallback_content_type(),
+        }
+    }
+}
+
+fn default_fallback_mode() -> String {
+    "first_upstream".to_string()
+}
+fn default_fallback_status() -> u16 {
+    404
+}
+fn default_fallback_content_type() -> String {
+    "text/html; charset=utf-8".to_string()
 }
 
 /// Listener (bind address + optional TLS).

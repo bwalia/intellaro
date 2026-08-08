@@ -48,7 +48,8 @@ impl Default for RouterConfig {
     }
 }
 
-/// A single routing rule that maps a match condition to a backend group.
+/// A single routing rule that maps a match condition to a backend group
+/// or a direct response action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingRule {
     /// Human-readable name for logging and metrics.
@@ -61,8 +62,24 @@ pub struct RoutingRule {
     /// Match conditions (all must be true for the rule to fire).
     pub r#match: MatchConfig,
 
-    /// Target backend group name.
+    /// Target backend group name. May be empty when `action` is set
+    /// (static/redirect rules never reach a backend).
+    #[serde(default)]
     pub backend_group: String,
+
+    /// Direct response action (static page or redirect) instead of
+    /// proxying. WSLProxy response-code parity: 200/403 static,
+    /// 301/302 redirect; absent = proxy (305).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<RuleAction>,
+
+    /// Path prefix to strip from the request before forwarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strip_path_prefix: Option<String>,
+
+    /// Replacement for the stripped prefix (defaults to empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_prefix_with: Option<String>,
 
     /// Per-rule balancer override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +100,36 @@ pub struct RoutingRule {
 
 fn default_priority() -> u32 {
     100
+}
+
+/// Direct response action for a routing rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RuleAction {
+    /// Serve a static response (custom block/landing pages).
+    Static {
+        #[serde(default = "default_static_status")]
+        status: u16,
+        /// Response body, plain text/HTML.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+    },
+    /// Redirect to a location.
+    Redirect {
+        location: String,
+        /// 301, 302, 307, or 308. Default: 302.
+        #[serde(default = "default_redirect_status")]
+        status: u16,
+    },
+}
+
+fn default_static_status() -> u16 {
+    200
+}
+fn default_redirect_status() -> u16 {
+    302
 }
 fn default_true() -> bool {
     true
@@ -126,6 +173,10 @@ pub struct MatchConfig {
     /// Match by content type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+
+    /// Match by client source IP (CIDR notation; bare IPs allowed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_cidrs: Vec<String>,
 }
 
 /// Load balancer configuration.

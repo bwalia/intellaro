@@ -74,6 +74,7 @@ sha2 = "0.10"
 # Intelligent routing engine (in-process library)
 intellaro-http-router = { path = "../intellaro-http-router" }
 intellaro-config = { path = "../intellaro-config" }
+base64 = "0.22"
 
 [dev-dependencies]
 tokio-test = "0.4"
