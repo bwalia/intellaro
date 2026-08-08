@@ -1,0 +1,126 @@
+# Test-domain use cases for the Intellaro ingress in k3s1.
+#
+# Prereqs (already deployed by helm/intellaro + examples/k8s-demo.yaml):
+#   * data plane exposed on NodePort 30880
+#   * echo-a / echo-b backends in intellaro-demo
+#
+# Apply:   kubectl apply -f examples/k8s-test-domain.yaml
+# Test:    see examples/k8s-test-domain-cheatsheet.md
+#
+# The vhost answers on intellaro-test.diytaxreturn.co.uk. Point the name
+# at any cluster node (LAN: 192.168.1.140) via /etc/hosts, or use
+# curl --resolve — Host headers with :30880 match fine (ports are
+# stripped before vhost matching).
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroVHost
+metadata:
+  name: test-domain
+  namespace: intellaro-demo
+spec:
+  hostname: intellaro-test.diytaxreturn.co.uk
+  upstream: test-domain-backend
+  lbPolicyRef: demo-lb
+---
+# ── Use case 1: default route — everything to echo-a ─────────────────
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-root
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathPrefix: /
+  backend: { serviceName: echo-a, servicePort: 80 }
+  timeoutSecs: 30
+  priority: 10
+---
+# ── Use case 2: path-based routing — /api to echo-b ──────────────────
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-api
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathPrefix: /api
+  backend: { serviceName: echo-b, servicePort: 80 }
+  priority: 100
+---
+# ── Use case 3: exact path beats prefix — /api/version back to echo-a ─
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-api-version
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathExact: /api/version
+  backend: { serviceName: echo-a, servicePort: 80 }
+  priority: 300
+---
+# ── Use case 4: weighted canary — /canary 80% echo-a / 20% echo-b ────
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-canary
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathPrefix: /canary
+  trafficSplit:
+    - backend: { serviceName: echo-a, servicePort: 80 }
+      weight: 80
+    - backend: { serviceName: echo-b, servicePort: 80 }
+      weight: 20
+  backend: { serviceName: echo-a, servicePort: 80 }
+  priority: 200
+---
+# ── Use case 5: header-based routing — X-Beta: "true" on /api → echo-a ─
+# (Overrides use case 2 for beta testers; higher priority wins.)
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-api-beta
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathPrefix: /api
+    headerMatches:
+      - name: X-Beta
+        exact: "true"
+  backend: { serviceName: echo-a, servicePort: 80 }
+  priority: 400
+---
+# ── Use case 6: regex path — /r/<digits> → echo-b ────────────────────
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-regex
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathRegex: "^/r/[0-9]+$"
+  backend: { serviceName: echo-b, servicePort: 80 }
+  priority: 250
+---
+# ── Use case 7: method restriction — POST-only /webhook → echo-b ─────
+# (GET /webhook falls through to the default route → echo-a.)
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: td-webhook
+  namespace: intellaro-demo
+spec:
+  vhostRef: test-domain
+  match:
+    pathPrefix: /webhook
+    methods: [POST]
+  backend: { serviceName: echo-b, servicePort: 80 }
+  priority: 260
