@@ -1,0 +1,81 @@
+{{- if .Values.dataplane.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "intellaro.fullname" . }}-dataplane
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dataplane
+spec:
+  replicas: {{ .Values.dataplane.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "intellaro.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: dataplane
+  template:
+    metadata:
+      labels:
+        {{- include "intellaro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dataplane
+      annotations:
+        checksum/config: {{ .Values.dataplane.config | sha256sum }}
+    spec:
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      containers:
+        - name: intellaro
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --role
+            - {{ .Values.dataplane.role | quote }}
+            - --config
+            - /etc/intellaro/config.yaml
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: ops
+              containerPort: 9090
+            - name: mcp
+              containerPort: 9091
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ops
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: ops
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/intellaro
+              readOnly: true
+          resources:
+            {{- toYaml .Values.dataplane.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "intellaro.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

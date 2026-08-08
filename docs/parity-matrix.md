@@ -76,7 +76,7 @@ accepted, enforcement pending (never silently dropped — compile warns) ·
 
 | Feature | Status | Notes |
 |---|---|---|
-| Config CRUD + reload API | ✅ | `GET/PUT /api/v1/config`, `POST /api/v1/config/reload` |
+| Config CRUD + reload API | ✅ | `GET/PUT /api/v1/config` (PUT hot-swaps state; idempotent on identical pushes), `POST /api/v1/config/reload` — k3s-verified |
 | Live hot reload on file change | ✅ | Watcher → validate → atomic state swap; last-good on error |
 | Status/system/services endpoints, OpenAPI | ✅ | `mcp.rs` |
 | Operator CLI | ✅ | `intellaro-http-cli` (vhosts, routes, security, cache, cluster) |
@@ -135,7 +135,7 @@ accepted, enforcement pending (never silently dropped — compile warns) ·
 
 | Capability | Status | Notes |
 |---|---|---|
-| Kubernetes controller, CRDs, reconcile into data plane | ✅ | `--role ingress`: VHost/Route/LBPolicy/SecurityPolicy/CachePolicy/ServiceDiscovery/RoutingPolicy CRDs, health probes, metrics |
+| Kubernetes controller, CRDs, reconcile into data plane | ✅ | `--role ingress` — verified end-to-end in k3s: CRs → router rules + service-DNS upstreams via MCP push, weighted traffic splits, status writeback (`SYNCED`), transition-only status patches |
 | Native `Ingress` resource + IngressClass | 🟡 | CRD-first today; core `Ingress` watch Phase 4 |
 | Same binary as the POP proxy | ✅ | `intellaro --role ingress` |
 | Gateway API (GatewayClass/HTTPRoute/…), conformance | ❌ | Phase 4 (`--role gateway` reserved) |

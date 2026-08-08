@@ -1,0 +1,75 @@
+image:
+  repository: int-spectoncr.diytaxreturn.co.uk/intellaro/intellaro
+  tag: latest
+  pullPolicy: Always
+  # Name of an existing kubernetes.io/dockerconfigjson secret for pulls.
+  pullSecret: ""
+
+
+# ── Data plane: `intellaro --role all` ────────────────────────────────
+# Reverse proxy (8080) + ops endpoints (9090: /metrics /health /ready)
+# + MCP management API (9091).
+dataplane:
+  enabled: true
+  replicas: 1
+  role: all
+
+  service:
+    type: ClusterIP
+    httpPort: 8080
+    opsPort: 9090
+    mcpPort: 9091
+
+  # Legacy flat ServerConfig (management_api is not yet part of the
+  # intellaro.io/v1 schema). Override with your own config as needed.
+  config: |
+    listeners:
+      - address: "0.0.0.0:8080"
+        protocol: auto
+    upstreams: []
+    logging:
+      level: info
+      format: json
+      metrics_path: /metrics
+      ops_address: "0.0.0.0:9090"
+    management_api:
+      address: "0.0.0.0:9091"
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+# ── Ingress controller: `intellaro --role ingress` ────────────────────
+# Watches Intellaro CRDs (installed from this chart's crds/) and
+# reconciles them into the data plane via the MCP API.
+ingressController:
+  enabled: true
+  replicas: 1
+
+  # Namespace to watch; empty = cluster-wide.
+  watchNamespace: ""
+
+  # MCP URL; empty = auto-wired to this release's data-plane service.
+  mcpUrl: ""
+
+  metricsPort: 9090
+  healthPort: 8081
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+serviceAccount:
+  # Used by the ingress controller (needs CRD/service/endpoint RBAC).
+  create: true
+  name: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

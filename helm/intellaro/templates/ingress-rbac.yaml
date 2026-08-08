@@ -1,0 +1,88 @@
+{{- if and .Values.ingressController.enabled .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "intellaro.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "intellaro.fullname" . }}-ingress
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+rules:
+  # Intellaro CRDs — full control (spec watch + status updates).
+  - apiGroups: ["ingress.intellaro.io"]
+    resources:
+      - intellarovhosts
+      - intellarovhosts/status
+      - intellaroroutes
+      - intellaroroutes/status
+      - intellarolbpolicies
+      - intellarolbpolicies/status
+      - intellarosecuritypolicies
+      - intellarosecuritypolicies/status
+      - intellarocachepolicies
+      - intellarocachepolicies/status
+      - intellaroservicediscoveries
+      - intellaroservicediscoveries/status
+      - intellaroroutingpolicies
+      - intellaroroutingpolicies/status
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Core resources for service/endpoint discovery.
+  - apiGroups: [""]
+    resources:
+      - services
+      - endpoints
+      - pods
+      - secrets
+      - configmaps
+      - namespaces
+    verbs: ["get", "list", "watch"]
+
+  # EndpointSlice API for scalable service discovery.
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
+
+  # Standard Ingress resources (for compatibility).
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingresses/status
+      - ingressclasses
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # Events for recording reconciliation outcomes.
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs: ["create", "patch"]
+
+  # Coordination for leader election.
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "intellaro.fullname" . }}-ingress
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "intellaro.fullname" . }}-ingress
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "intellaro.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

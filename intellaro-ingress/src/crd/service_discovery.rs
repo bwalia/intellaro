@@ -54,6 +54,7 @@ pub struct IntellaroServiceDiscoverySpec {
 
     /// Port discovery strategy.
     #[serde(default)]
+    #[schemars(schema_with = "super::preserve_unknown")]
     pub port_discovery: PortDiscovery,
 
     /// Whether to auto-register discovered services as backend groups.

@@ -50,9 +50,8 @@ pub async fn full_reconcile(ctx: &ReconcilerContext) -> IngressResult<()> {
 
     let mut config = ctx.mcp_client.get_config().await?;
 
-    // Reconcile each CRD type into the config document.
-    reconcile_vhosts(ctx, &mut config).await?;
-    reconcile_routes(ctx, &mut config).await?;
+    // VHosts + Routes + LBPolicies → data-plane upstreams and router rules.
+    build_routing(ctx, &mut config).await?;
     reconcile_lb_policies(ctx, &mut config).await?;
     reconcile_security_policies(ctx, &mut config).await?;
     reconcile_cache_policies(ctx, &mut config).await?;
@@ -63,168 +62,194 @@ pub async fn full_reconcile(ctx: &ReconcilerContext) -> IngressResult<()> {
     // Rules-driven routing: evaluate routing policies.
     reconcile_routing_policies(ctx, &mut config).await?;
 
-    // Push the merged configuration.
+    // Push the merged configuration. apply_update hot-swaps the data plane;
+    // do NOT call reload() here — that re-reads the config file and would
+    // revert this push.
     ctx.mcp_client.update_config(&config).await?;
-    ctx.mcp_client.reload().await?;
 
     info!("Full reconciliation complete");
     Ok(())
 }
 
-// ── VHost reconciler ────────────────────────────────────────────────
+// ── VHost + Route reconciler ────────────────────────────────────────
 
-/// Merge all IntellaroVHost resources into the server config's `upstreams` list.
-async fn reconcile_vhosts(
+/// Translate IntellaroVHost + IntellaroRoute (+ referenced LBPolicies)
+/// into the data plane's actual configuration:
+///
+/// * each route's backend service becomes an upstream whose server is the
+///   service's cluster-DNS name (kube-proxy handles endpoint balancing);
+///   traffic splits become one weighted upstream across services
+/// * each (vhost host, route match) pair becomes a router rule with the
+///   route's priority and timeout
+///
+/// The result is written to `config.upstreams` and `config.router.rules`,
+/// which is exactly what `intellaro-http-server` deserializes.
+async fn build_routing(
     ctx: &ReconcilerContext,
     config: &mut serde_json::Value,
 ) -> IngressResult<()> {
     let vhosts = list_resources::<IntellaroVHost>(ctx).await?;
+    let routes = list_resources::<IntellaroRoute>(ctx).await?;
 
-    let mut upstreams = Vec::new();
+    // Resolve each vhost's LB strategy / health check once.
+    let mut vhost_map: std::collections::HashMap<String, VHostInfo> =
+        std::collections::HashMap::new();
 
     for vhost in &vhosts {
         let spec = &vhost.spec;
         let name = vhost.name_any();
 
-        debug!(vhost = %name, hostname = %spec.hostname, "Reconciling VHost");
+        let mut info = VHostInfo {
+            hostnames: std::iter::once(spec.hostname.clone())
+                .chain(spec.aliases.iter().cloned())
+                .collect(),
+            strategy: json!("round_robin"),
+            health_check: None,
+        };
 
-        let mut upstream = json!({
-            "name": spec.upstream,
-            "host_match": spec.hostname,
-            "backends": [],
-            "strategy": "round_robin",
-        });
-
-        // Apply LB policy if referenced.
         if let Some(ref lb_ref) = spec.lb_policy_ref {
-            if let Some(lb) = find_resource::<IntellaroLBPolicy>(ctx, lb_ref).await? {
-                let strategy = serde_json::to_value(&lb.spec.strategy)
-                    .unwrap_or(json!("round_robin"));
-                upstream["strategy"] = strategy;
-
+            let vhost_ns = vhost.namespace();
+            if let Some(lb) =
+                find_resource::<IntellaroLBPolicy>(ctx, lb_ref, vhost_ns.as_deref()).await?
+            {
+                info.strategy =
+                    serde_json::to_value(&lb.spec.strategy).unwrap_or(json!("round_robin"));
                 if let Some(ref hc) = lb.spec.health_check {
-                    upstream["health_check"] = json!({
+                    info.health_check = Some(json!({
                         "path": hc.path,
                         "interval_secs": hc.interval_secs,
-                        "timeout_secs": hc.timeout_secs,
                         "unhealthy_threshold": hc.unhealthy_threshold,
-                    });
+                    }));
                 }
             }
         }
 
-        // Apply TLS settings.
-        if let Some(ref tls) = spec.tls {
-            if tls.enabled {
-                upstream["tls"] = json!({
-                    "enabled": true,
-                    "secret_name": tls.secret_name,
-                    "min_version": tls.min_version,
-                    "acme": tls.acme,
-                });
-            }
+        if spec.tls.as_ref().is_some_and(|t| t.enabled) {
+            warn!(
+                vhost = %name,
+                "TLS termination via VHost secrets is not wired into the data plane yet — serving plain HTTP"
+            );
         }
 
-        upstreams.push(upstream);
+        debug!(vhost = %name, hostname = %spec.hostname, "Resolved VHost");
+        vhost_map.insert(name, info);
     }
 
-    config["upstreams"] = json!(upstreams);
-    Ok(())
-}
-
-// ── Route reconciler ────────────────────────────────────────────────
-
-/// Merge all IntellaroRoute resources into the server config's `routes` section.
-async fn reconcile_routes(
-    ctx: &ReconcilerContext,
-    config: &mut serde_json::Value,
-) -> IngressResult<()> {
-    let routes = list_resources::<IntellaroRoute>(ctx).await?;
-
-    let mut route_entries = Vec::new();
+    let mut upstreams: Vec<serde_json::Value> = Vec::new();
+    let mut seen_upstreams: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rules: Vec<serde_json::Value> = Vec::new();
 
     for route in &routes {
         let spec = &route.spec;
         let name = route.name_any();
+        let route_ns = route.namespace().unwrap_or_else(|| "default".to_string());
 
-        debug!(route = %name, vhost = %spec.vhost_ref, "Reconciling Route");
+        let Some(vhost) = vhost_map.get(&spec.vhost_ref) else {
+            warn!(route = %name, vhost_ref = %spec.vhost_ref, "Route references unknown VHost — skipping");
+            continue;
+        };
 
-        let mut entry = json!({
-            "name": name,
-            "vhost_ref": spec.vhost_ref,
-            "backend": {
-                "service_name": spec.backend.service_name,
-                "service_port": spec.backend.service_port,
-            },
-            "priority": spec.priority,
-        });
-
-        // Match criteria.
-        let mut match_obj = json!({});
-        if let Some(ref prefix) = spec.r#match.path_prefix {
-            match_obj["path_prefix"] = json!(prefix);
-        }
-        if let Some(ref exact) = spec.r#match.path_exact {
-            match_obj["path_exact"] = json!(exact);
-        }
-        if let Some(ref regex) = spec.r#match.path_regex {
-            match_obj["path_regex"] = json!(regex);
-        }
-        if !spec.r#match.methods.is_empty() {
-            match_obj["methods"] = json!(spec.r#match.methods);
-        }
-        entry["match"] = match_obj;
-
-        // Traffic split.
-        if !spec.traffic_split.is_empty() {
-            let splits: Vec<serde_json::Value> = spec
+        // ── Upstream for this route ──────────────────────────────────
+        let (group_name, upstream) = if spec.traffic_split.is_empty() {
+            let backend = &spec.backend;
+            let ns = backend.namespace.clone().unwrap_or_else(|| route_ns.clone());
+            let group = format!("{}-{}-{}", ns, backend.service_name, backend.service_port);
+            let upstream = json!({
+                "name": group,
+                "servers": [{
+                    "address": service_dns(&backend.service_name, &ns, backend.service_port),
+                    "weight": 1,
+                }],
+                "load_balancing": vhost.strategy,
+                "health_check": vhost.health_check,
+            });
+            (group, upstream)
+        } else {
+            // Weighted split across services → one weighted upstream.
+            let group = format!("route-{}-{}-split", route_ns, name);
+            let servers: Vec<serde_json::Value> = spec
                 .traffic_split
                 .iter()
                 .map(|ts| {
+                    let ns = ts.backend.namespace.clone().unwrap_or_else(|| route_ns.clone());
                     json!({
-                        "backend": {
-                            "service_name": ts.backend.service_name,
-                            "service_port": ts.backend.service_port,
-                        },
-                        "weight": ts.weight,
+                        "address": service_dns(&ts.backend.service_name, &ns, ts.backend.service_port),
+                        "weight": ts.weight.max(1),
                     })
                 })
                 .collect();
-            entry["traffic_split"] = json!(splits);
-        }
-
-        // Rewrite.
-        if let Some(ref rewrite) = spec.rewrite {
-            entry["rewrite"] = json!({
-                "replace_path_prefix": rewrite.replace_path_prefix,
-                "replace_host": rewrite.replace_host,
+            let upstream = json!({
+                "name": group,
+                "servers": servers,
+                "load_balancing": "weighted",
+                "health_check": vhost.health_check,
             });
+            (group, upstream)
+        };
+
+        if seen_upstreams.insert(group_name.clone()) {
+            upstreams.push(upstream);
         }
 
-        // Timeout and retry.
-        if let Some(timeout) = spec.timeout_secs {
-            entry["timeout_secs"] = json!(timeout);
-        }
-        if let Some(ref retry) = spec.retry {
-            entry["retry"] = json!({
-                "max_retries": retry.max_retries,
-                "retry_on_status": retry.retry_on_status,
-                "per_retry_timeout_secs": retry.per_retry_timeout_secs,
-            });
+        // ── Router rule(s): one per hostname/alias ───────────────────
+        let mut headers = serde_json::Map::new();
+        for hm in &spec.r#match.header_matches {
+            if let Some(ref exact) = hm.exact {
+                headers.insert(hm.name.clone(), json!(exact));
+            } else {
+                warn!(route = %name, header = %hm.name, "Only exact header matches are supported today — skipping condition");
+            }
         }
 
-        route_entries.push(entry);
+        if spec.rewrite.is_some() {
+            warn!(route = %name, "Path/host rewrite is not wired into the data plane yet — ignored");
+        }
+
+        for hostname in &vhost.hostnames {
+            rules.push(json!({
+                "name": format!("{}/{}", hostname, name),
+                "priority": spec.priority,
+                "match": {
+                    "host": hostname,
+                    "path_prefix": spec.r#match.path_prefix,
+                    "path_exact": spec.r#match.path_exact,
+                    "path_regex": spec.r#match.path_regex,
+                    "methods": spec.r#match.methods,
+                    "headers": headers,
+                },
+                "backend_group": group_name,
+                "timeout_secs": spec.timeout_secs,
+                "enabled": true,
+            }));
+        }
+
+        debug!(route = %name, group = %group_name, "Reconciled Route");
     }
 
-    // Sort by priority descending so higher-priority routes match first.
-    route_entries.sort_by(|a, b| {
-        let pa = a["priority"].as_u64().unwrap_or(100);
-        let pb = b["priority"].as_u64().unwrap_or(100);
-        pb.cmp(&pa)
-    });
+    info!(
+        vhosts = vhost_map.len(),
+        routes = routes.len(),
+        upstreams = upstreams.len(),
+        rules = rules.len(),
+        "Built routing configuration"
+    );
 
-    config["routes"] = json!(route_entries);
+    config["upstreams"] = json!(upstreams);
+    config["router"] = json!({ "rules": rules });
     Ok(())
+}
+
+/// Per-VHost data resolved once and reused by every route.
+struct VHostInfo {
+    hostnames: Vec<String>,
+    strategy: serde_json::Value,
+    health_check: Option<serde_json::Value>,
+}
+
+/// Cluster-DNS address for a Service. kube-proxy balances across the
+/// service's endpoints; Intellaro balances across services (splits).
+fn service_dns(service: &str, namespace: &str, port: u16) -> String {
+    format!("{service}.{namespace}.svc.cluster.local:{port}")
 }
 
 // ── LB Policy reconciler ───────────────────────────────────────────
@@ -277,12 +302,14 @@ async fn reconcile_security_policies(
 
         if let Some(ref j) = spec.jwt {
             if j.enabled {
-                jwt = Some(json!({
-                    "secret_ref": j.secret_ref,
-                    "issuer": j.issuer,
-                    "audience": j.audience,
-                    "jwks_uri": j.jwks_uri,
-                }));
+                // The data plane's JwtConfig takes an inline secret or key
+                // path; resolving a Kubernetes Secret into it is not wired
+                // up yet, so surface that instead of pushing a broken config.
+                warn!(
+                    policy = %name,
+                    "JWT via SecurityPolicy secretRef is not wired into the data plane yet — skipping"
+                );
+                jwt = None;
             }
         }
     }
@@ -383,19 +410,19 @@ async fn reconcile_service_discovery(
     let mut all_upstreams = existing_upstreams;
 
     for (_group_name, svc) in &service_map.services {
-        let backends: Vec<serde_json::Value> = svc
+        let servers: Vec<serde_json::Value> = svc
             .endpoints
             .iter()
             .filter(|ep| ep.ready)
             .map(|ep| {
                 json!({
                     "address": format!("{}:{}", ep.address, ep.port),
-                    "healthy": ep.ready,
+                    "weight": 1,
                 })
             })
             .collect();
 
-        if backends.is_empty() {
+        if servers.is_empty() {
             continue;
         }
 
@@ -407,12 +434,8 @@ async fn reconcile_service_discovery(
 
         let upstream = json!({
             "name": svc.group_name,
-            "host_match": format!("{}.{}", svc.name, svc.namespace),
-            "backends": backends,
-            "strategy": lb_strategy,
-            "auto_discovered": true,
-            "source_namespace": svc.namespace,
-            "source_service": svc.name,
+            "servers": servers,
+            "load_balancing": lb_strategy,
         });
 
         // Don't duplicate: check if an upstream with this name already exists.
@@ -515,10 +538,15 @@ where
     Ok(list.items.into_iter().map(Arc::new).collect())
 }
 
-/// Find a single resource by name in the watched scope.
+/// Find a single resource by name (optionally pinned to a namespace).
+///
+/// Implemented as list-and-match: a cluster-scoped GET of a namespaced
+/// resource is not a valid Kubernetes API route (k3s answers it with a
+/// non-JSON 404), so `Api::all(...).get()` must never be used here.
 async fn find_resource<K>(
     ctx: &ReconcilerContext,
     name: &str,
+    namespace: Option<&str>,
 ) -> IngressResult<Option<Arc<K>>>
 where
     K: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
@@ -528,16 +556,14 @@ where
         + 'static,
     <K as kube::Resource>::DynamicType: Default,
 {
-    let api: Api<K> = match &ctx.namespace {
-        Some(ns) => Api::namespaced(ctx.kube_client.clone(), ns),
-        None => Api::all(ctx.kube_client.clone()),
-    };
+    let items = list_resources::<K>(ctx).await?;
+    let found = items.into_iter().find(|r| {
+        r.name_any() == name
+            && namespace.is_none_or(|ns| r.namespace().as_deref() == Some(ns))
+    });
 
-    match api.get_opt(name).await? {
-        Some(resource) => Ok(Some(Arc::new(resource))),
-        None => {
-            warn!(resource = %name, kind = %std::any::type_name::<K>(), "Referenced resource not found");
-            Ok(None)
-        }
+    if found.is_none() {
+        warn!(resource = %name, kind = %std::any::type_name::<K>(), "Referenced resource not found");
     }
+    Ok(found)
 }

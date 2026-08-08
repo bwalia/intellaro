@@ -1,0 +1,25 @@
+{{- if .Values.dataplane.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "intellaro.fullname" . }}-dataplane
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dataplane
+spec:
+  type: {{ .Values.dataplane.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "intellaro.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: dataplane
+  ports:
+    - name: http
+      port: {{ .Values.dataplane.service.httpPort }}
+      targetPort: http
+    - name: ops
+      port: {{ .Values.dataplane.service.opsPort }}
+      targetPort: ops
+    - name: mcp
+      port: {{ .Values.dataplane.service.mcpPort }}
+      targetPort: mcp
+{{- end }}

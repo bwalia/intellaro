@@ -1,0 +1,1807 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellarovhosts.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroVHost
+    plural: intellarovhosts
+    shortNames:
+    - ivh
+    singular: intellarovhost
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.hostname
+      name: Host
+      type: string
+    - jsonPath: .spec.tls.enabled
+      name: TLS
+      type: boolean
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroVHostSpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroVHost custom resource.
+            properties:
+              aliases:
+                description: Optional list of hostname aliases.
+                items:
+                  type: string
+                type: array
+              cachePolicyRef:
+                description: Optional reference to an IntellaroCachePolicy for this vhost.
+                nullable: true
+                type: string
+              defaultBackend:
+                description: Default backend service to use when no route matches.
+                nullable: true
+                properties:
+                  namespace:
+                    description: Optional namespace (defaults to the CRD's namespace).
+                    nullable: true
+                    type: string
+                  serviceName:
+                    description: Service name.
+                    type: string
+                  servicePort:
+                    description: Service port number.
+                    format: uint16
+                    minimum: 0.0
+                    type: integer
+                required:
+                - serviceName
+                - servicePort
+                type: object
+              hostname:
+                description: Fully-qualified hostname this vhost serves (e.g., "api.example.com").
+                type: string
+              lbPolicyRef:
+                description: Optional reference to an IntellaroLBPolicy for this vhost.
+                nullable: true
+                type: string
+              securityPolicyRef:
+                description: Optional reference to an IntellaroSecurityPolicy for this vhost.
+                nullable: true
+                type: string
+              tls:
+                description: TLS configuration for this vhost.
+                nullable: true
+                properties:
+                  acme:
+                    default: false
+                    description: Enable automatic certificate provisioning via ACME / Let's Encrypt.
+                    type: boolean
+                  enabled:
+                    default: false
+                    description: Enable TLS termination for this vhost.
+                    type: boolean
+                  minVersion:
+                    description: Minimum TLS version (e.g., "1.2", "1.3").
+                    nullable: true
+                    type: string
+                  secretName:
+                    description: Name of the Kubernetes Secret containing tls.crt and tls.key.
+                    nullable: true
+                    type: string
+                type: object
+              upstream:
+                description: Name of the upstream backend group to forward traffic to.
+                type: string
+            required:
+            - hostname
+            - upstream
+            type: object
+          status:
+            description: Observed status of the IntellaroVHost.
+            nullable: true
+            properties:
+              activeBackends:
+                default: 0
+                description: Number of active backends serving this vhost.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncedAt:
+                description: Last time the configuration was pushed to the server.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              synced:
+                default: false
+                description: Whether the vhost configuration is synced to intellaro-http-server.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroVHost
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellaroroutes.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroRoute
+    plural: intellaroroutes
+    shortNames:
+    - irt
+    singular: intellaroroute
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.vhostRef
+      name: VHost
+      type: string
+    - jsonPath: .spec.match.pathPrefix
+      name: Path
+      type: string
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroRouteSpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroRoute custom resource.
+            properties:
+              backend:
+                description: Primary backend for matched requests.
+                properties:
+                  namespace:
+                    description: Optional namespace (defaults to the CRD's namespace).
+                    nullable: true
+                    type: string
+                  serviceName:
+                    description: Service name.
+                    type: string
+                  servicePort:
+                    description: Service port number.
+                    format: uint16
+                    minimum: 0.0
+                    type: integer
+                required:
+                - serviceName
+                - servicePort
+                type: object
+              headers:
+                description: Request/response header manipulation.
+                nullable: true
+                properties:
+                  requestRemove:
+                    description: Header names to remove from the proxied request.
+                    items:
+                      type: string
+                    type: array
+                  requestSet:
+                    description: Headers to add/set on the proxied request.
+                    items:
+                      description: A key-value pair representing a header.
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                  responseRemove:
+                    description: Header names to remove from the proxied response.
+                    items:
+                      type: string
+                    type: array
+                  responseSet:
+                    description: Headers to add/set on the proxied response.
+                    items:
+                      description: A key-value pair representing a header.
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                type: object
+              match:
+                description: Matching criteria for this route.
+                properties:
+                  headerMatches:
+                    description: Header-based matching conditions.
+                    items:
+                      description: Header matching condition.
+                      properties:
+                        exact:
+                          description: Exact value to match.
+                          nullable: true
+                          type: string
+                        name:
+                          description: Header name.
+                          type: string
+                        regex:
+                          description: Regex to match the header value.
+                          nullable: true
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  methods:
+                    description: HTTP methods to match (empty = all).
+                    items:
+                      type: string
+                    type: array
+                  pathExact:
+                    description: Match requests whose path matches this exact value.
+                    nullable: true
+                    type: string
+                  pathPrefix:
+                    description: Match requests whose path starts with this prefix.
+                    nullable: true
+                    type: string
+                  pathRegex:
+                    description: Match requests whose path matches this regex.
+                    nullable: true
+                    type: string
+                type: object
+              priority:
+                default: 100
+                description: 'Priority for ordering routes (higher = matched first). Default: 100.'
+                format: uint32
+                minimum: 0.0
+                type: integer
+              retry:
+                description: Optional per-route retry policy.
+                nullable: true
+                properties:
+                  maxRetries:
+                    description: Maximum number of retry attempts.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  perRetryTimeoutSecs:
+                    description: Per-retry timeout in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  retryOnStatus:
+                    description: HTTP status codes that trigger a retry.
+                    items:
+                      format: uint16
+                      minimum: 0.0
+                      type: integer
+                    type: array
+                required:
+                - maxRetries
+                type: object
+              rewrite:
+                description: Optional URL rewrite rules.
+                nullable: true
+                properties:
+                  replaceHost:
+                    description: Replace the matched hostname.
+                    nullable: true
+                    type: string
+                  replacePathPrefix:
+                    description: Replace the matched path prefix with this value.
+                    nullable: true
+                    type: string
+                type: object
+              timeoutSecs:
+                description: Optional per-route timeout in seconds.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              trafficSplit:
+                description: Optional traffic-split targets for canary / blue-green.
+                items:
+                  description: A backend with a traffic weight for canary/blue-green splits.
+                  properties:
+                    backend:
+                      description: Backend service reference.
+                      properties:
+                        namespace:
+                          description: Optional namespace (defaults to the CRD's namespace).
+                          nullable: true
+                          type: string
+                        serviceName:
+                          description: Service name.
+                          type: string
+                        servicePort:
+                          description: Service port number.
+                          format: uint16
+                          minimum: 0.0
+                          type: integer
+                      required:
+                      - serviceName
+                      - servicePort
+                      type: object
+                    weight:
+                      description: Traffic weight (0–100).
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                  required:
+                  - backend
+                  - weight
+                  type: object
+                type: array
+              vhostRef:
+                description: Reference to the parent IntellaroVHost name (must be in the same namespace).
+                type: string
+            required:
+            - backend
+            - match
+            - vhostRef
+            type: object
+          status:
+            description: Observed status of the IntellaroRoute.
+            nullable: true
+            properties:
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncedAt:
+                description: Last time the route was pushed to the server.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              synced:
+                default: false
+                description: Whether the route is synced to intellaro-http-server.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroRoute
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellarolbpolicies.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroLBPolicy
+    plural: intellarolbpolicies
+    shortNames:
+    - ilb
+    singular: intellarolbpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.strategy
+      name: Strategy
+      type: string
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroLBPolicySpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroLBPolicy custom resource.
+            properties:
+              failover:
+                description: Failover configuration.
+                nullable: true
+                properties:
+                  customErrorPage:
+                    default: false
+                    description: Return a static error page instead of 502 when all backends are down.
+                    type: boolean
+                  fallbackUpstream:
+                    description: Fallback upstream group name to try when primary is exhausted.
+                    nullable: true
+                    type: string
+                type: object
+              healthCheck:
+                description: Health check configuration for backends.
+                nullable: true
+                properties:
+                  expectedStatus:
+                    description: Expected HTTP status code (200 if omitted).
+                    format: uint16
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  healthyThreshold:
+                    default: 2
+                    description: Consecutive successes before marking healthy.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  intervalSecs:
+                    default: 10
+                    description: Interval between probes in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  path:
+                    description: HTTP path to probe (e.g., "/healthz").
+                    type: string
+                  timeoutSecs:
+                    default: 5
+                    description: Probe timeout in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  unhealthyThreshold:
+                    default: 3
+                    description: Consecutive failures before marking unhealthy.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                required:
+                - path
+                type: object
+              maxConnectionsPerBackend:
+                description: Connection limits per backend.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              slowStartSecs:
+                description: Slow-start window in seconds for newly healthy backends.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
+              stickySession:
+                description: Sticky session (session affinity) configuration.
+                nullable: true
+                properties:
+                  cookieName:
+                    description: Cookie name when mode is `Cookie`.
+                    nullable: true
+                    type: string
+                  cookieTtlSecs:
+                    description: Cookie TTL in seconds (0 = session cookie).
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  headerName:
+                    description: Header name when mode is `Header`.
+                    nullable: true
+                    type: string
+                  mode:
+                    description: Affinity mode.
+                    enum:
+                    - source_ip
+                    - cookie
+                    - header
+                    type: string
+                required:
+                - mode
+                type: object
+              strategy:
+                description: Load balancing strategy.
+                enum:
+                - round_robin
+                - least_connections
+                - weighted
+                - random
+                - consistent_hash
+                type: string
+            required:
+            - strategy
+            type: object
+          status:
+            description: Observed status of the IntellaroLBPolicy.
+            nullable: true
+            properties:
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncedAt:
+                description: Last time the policy was pushed.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              synced:
+                default: false
+                description: Whether the policy is synced to intellaro-http-server.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroLBPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellarosecuritypolicies.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroSecurityPolicy
+    plural: intellarosecuritypolicies
+    shortNames:
+    - isp
+    singular: intellarosecuritypolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.jwt.enabled
+      name: JWT
+      type: boolean
+    - jsonPath: .spec.rateLimit.enabled
+      name: RateLimit
+      type: boolean
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroSecurityPolicySpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroSecurityPolicy custom resource.
+            properties:
+              cors:
+                description: CORS policy.
+                nullable: true
+                properties:
+                  allowCredentials:
+                    default: false
+                    description: Whether to allow credentials.
+                    type: boolean
+                  allowHeaders:
+                    description: Allowed request headers.
+                    items:
+                      type: string
+                    type: array
+                  allowMethods:
+                    description: Allowed HTTP methods.
+                    items:
+                      type: string
+                    type: array
+                  allowOrigins:
+                    description: Allowed origins ("*" for any).
+                    items:
+                      type: string
+                    type: array
+                  exposeHeaders:
+                    description: Headers exposed to the browser.
+                    items:
+                      type: string
+                    type: array
+                  maxAgeSecs:
+                    description: Preflight cache duration in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              ipAllow:
+                description: IP allow list (CIDR notation).
+                items:
+                  type: string
+                type: array
+              ipBlock:
+                description: IP block list (CIDR notation).
+                items:
+                  type: string
+                type: array
+              jwt:
+                description: JWT / OAuth2 validation settings.
+                nullable: true
+                properties:
+                  audience:
+                    description: Expected audience claim.
+                    nullable: true
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enable JWT validation.
+                    type: boolean
+                  forwardClaims:
+                    default: false
+                    description: Forward validated claims as headers to the backend.
+                    type: boolean
+                  issuer:
+                    description: Expected issuer claim.
+                    nullable: true
+                    type: string
+                  jwksUri:
+                    description: JWKS URI for dynamic key fetching (for OAuth2 / OIDC).
+                    nullable: true
+                    type: string
+                  secretRef:
+                    description: Name of a Kubernetes Secret containing the verification key/secret.
+                    nullable: true
+                    type: string
+                  tokenHeader:
+                    description: 'Header name to extract the token from (default: "Authorization").'
+                    nullable: true
+                    type: string
+                type: object
+              rateLimit:
+                description: Rate limiting configuration.
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Enable rate limiting.
+                    type: boolean
+                  key:
+                    default: client_ip
+                    description: Key to rate-limit on.
+                    enum:
+                    - client_ip
+                    - header
+                    - user
+                    type: string
+                  keyHeader:
+                    description: 'Header to key on when `key: header`.'
+                    nullable: true
+                    type: string
+                  maxRequests:
+                    description: Maximum requests per window.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  statusCode:
+                    description: 'HTTP status code to return when rate limited (default: 429).'
+                    format: uint16
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  windowSecs:
+                    default: 60
+                    description: Sliding window duration in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                required:
+                - maxRequests
+                type: object
+              targetRefs:
+                description: 'Scope: which vhosts or routes this policy applies to. Empty means cluster-wide default.'
+                items:
+                  description: Reference to a target resource this policy applies to.
+                  properties:
+                    kind:
+                      description: Kind of the target ("IntellaroVHost" or "IntellaroRoute").
+                      type: string
+                    name:
+                      description: Name of the target resource.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+            type: object
+          status:
+            description: Observed status of the IntellaroSecurityPolicy.
+            nullable: true
+            properties:
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncedAt:
+                description: Last time the policy was pushed.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              synced:
+                default: false
+                description: Whether the policy is synced to intellaro-http-server.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroSecurityPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellarocachepolicies.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroCachePolicy
+    plural: intellarocachepolicies
+    shortNames:
+    - icp
+    singular: intellarocachepolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.enabled
+      name: Enabled
+      type: boolean
+    - jsonPath: .spec.evictionStrategy
+      name: Strategy
+      type: string
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroCachePolicySpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroCachePolicy custom resource.
+            properties:
+              cacheableMethods:
+                default:
+                - GET
+                - HEAD
+                description: 'HTTP methods to cache (default: GET, HEAD).'
+                items:
+                  type: string
+                type: array
+              cacheableStatuses:
+                default:
+                - 200
+                - 301
+                - 302
+                description: 'Status codes to cache (default: 200, 301, 302).'
+                items:
+                  format: uint16
+                  minimum: 0.0
+                  type: integer
+                type: array
+              defaultTtlSecs:
+                default: 300
+                description: Default TTL in seconds for cached responses.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              enabled:
+                default: true
+                description: Enable caching for matched targets.
+                type: boolean
+              evictionStrategy:
+                default: lru
+                description: Cache eviction strategy.
+                enum:
+                - lru
+                - lfu
+                - ttl_only
+                type: string
+              maxEntries:
+                default: 10000
+                description: Maximum number of entries in the cache.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              pathRules:
+                description: Per-path TTL overrides.
+                items:
+                  description: Path-specific cache rule override.
+                  properties:
+                    bypass:
+                      default: false
+                      description: Disable caching for this path.
+                      type: boolean
+                    pathPrefix:
+                      description: Path prefix to match.
+                      type: string
+                    ttlSecs:
+                      description: TTL override in seconds for this path.
+                      format: uint64
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                  required:
+                  - pathPrefix
+                  type: object
+                type: array
+              prefetch:
+                description: Enable predictive prefetching based on access patterns.
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Enable prefetching.
+                    type: boolean
+                  lookaheadSecs:
+                    default: 60
+                    description: Look-ahead window in seconds for prefetch prediction.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  minHits:
+                    default: 10
+                    description: Minimum request count before prefetching activates for a pattern.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                type: object
+              respectOriginHeaders:
+                default: true
+                description: Respect Cache-Control headers from the origin.
+                type: boolean
+              targetRefs:
+                description: 'Scope: which vhosts or routes this policy applies to.'
+                items:
+                  description: Reference to a target resource this policy applies to.
+                  properties:
+                    kind:
+                      description: Kind of the target ("IntellaroVHost" or "IntellaroRoute").
+                      type: string
+                    name:
+                      description: Name of the target resource.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              varyHeaders:
+                description: Vary headers to include in the cache key.
+                items:
+                  type: string
+                type: array
+            type: object
+          status:
+            description: Observed status of the IntellaroCachePolicy.
+            nullable: true
+            properties:
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncedAt:
+                description: Last time the policy was pushed.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              synced:
+                default: false
+                description: Whether the policy is synced to intellaro-http-server.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroCachePolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellaroservicediscoveries.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroServiceDiscovery
+    plural: intellaroservicediscoveries
+    shortNames:
+    - isd
+    singular: intellaroservicediscovery
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.discoveredServices
+      name: Services
+      type: integer
+    - jsonPath: .status.discoveredEndpoints
+      name: Endpoints
+      type: integer
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroServiceDiscoverySpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroServiceDiscovery custom resource.
+            properties:
+              annotationSelector:
+                description: Annotation selector to filter discovered services.
+                nullable: true
+                type: string
+              autoRegister:
+                default: true
+                description: Whether to auto-register discovered services as backend groups.
+                type: boolean
+              clusterWide:
+                default: false
+                description: If true, discover services across all namespaces (overrides `namespaces`).
+                type: boolean
+              crossCluster:
+                description: Cross-cluster discovery configuration.
+                nullable: true
+                properties:
+                  clusters:
+                    description: Remote clusters to discover services from.
+                    items:
+                      description: Reference to a remote Kubernetes cluster.
+                      properties:
+                        kubeconfigNamespace:
+                          description: Namespace containing the kubeconfig Secret.
+                          nullable: true
+                          type: string
+                        kubeconfigSecret:
+                          description: Kubeconfig context name, or a Secret reference containing kubeconfig.
+                          type: string
+                        name:
+                          description: Human-readable name for this cluster.
+                          type: string
+                        weight:
+                          default: 100
+                          description: Weight for cross-cluster load balancing (higher = more traffic).
+                          format: uint32
+                          minimum: 0.0
+                          type: integer
+                      required:
+                      - kubeconfigSecret
+                      - name
+                      type: object
+                    type: array
+                  enabled:
+                    default: false
+                    description: Whether cross-cluster discovery is enabled.
+                    type: boolean
+                type: object
+              defaultLbStrategy:
+                default: round_robin
+                description: Default load balancing strategy for auto-registered backends.
+                type: string
+              excludeServices:
+                description: 'Exclusion rules: services matching these patterns are ignored.'
+                items:
+                  description: Filter for including/excluding services by name or label.
+                  properties:
+                    labelSelector:
+                      description: Label selector (e.g., "app=nginx").
+                      nullable: true
+                      type: string
+                    namePattern:
+                      description: Glob pattern for service name (e.g., "kube-*", "*.internal").
+                      nullable: true
+                      type: string
+                    namespacePattern:
+                      description: Namespace pattern.
+                      nullable: true
+                      type: string
+                  type: object
+                type: array
+              groupNameTemplate:
+                default: '{namespace}-{name}'
+                description: 'Backend group naming template. Supported variables: {namespace}, {name}, {port}.'
+                type: string
+              healthCheck:
+                description: Health check configuration for discovered services.
+                nullable: true
+                properties:
+                  intervalSecs:
+                    default: 10
+                    description: Probe interval in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  path:
+                    description: HTTP path to probe.
+                    type: string
+                  timeoutSecs:
+                    default: 5
+                    description: Probe timeout in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  unhealthyThreshold:
+                    default: 3
+                    description: Consecutive failures to mark unhealthy.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                required:
+                - path
+                type: object
+              includeServices:
+                description: 'Inclusion rules: only services matching these patterns are included. If empty, all services (minus exclusions) are included.'
+                items:
+                  description: Filter for including/excluding services by name or label.
+                  properties:
+                    labelSelector:
+                      description: Label selector (e.g., "app=nginx").
+                      nullable: true
+                      type: string
+                    namePattern:
+                      description: Glob pattern for service name (e.g., "kube-*", "*.internal").
+                      nullable: true
+                      type: string
+                    namespacePattern:
+                      description: Namespace pattern.
+                      nullable: true
+                      type: string
+                  type: object
+                type: array
+              labelSelector:
+                description: Label selector to filter discovered services.
+                nullable: true
+                type: string
+              mode:
+                default: kubernetes
+                description: Discovery mode.
+                enum:
+                - kubernetes
+                - endpointSlice
+                - dns
+                type: string
+              namespaces:
+                description: Namespaces to discover services in. Empty = same namespace as this CRD.
+                items:
+                  type: string
+                type: array
+              pollIntervalSecs:
+                default: 30
+                description: How frequently to poll for changes (seconds). 0 = event-driven only.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              portDiscovery:
+                default: allNamed
+                description: Port discovery strategy.
+                x-kubernetes-preserve-unknown-fields: true
+            type: object
+          status:
+            description: Observed status of the IntellaroServiceDiscovery.
+            nullable: true
+            properties:
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              discoveredEndpoints:
+                default: 0
+                description: Number of healthy endpoints discovered.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              discoveredServices:
+                default: 0
+                description: Number of services currently discovered.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              lastSyncedAt:
+                description: Last time the discovery scan completed.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              registeredGroups:
+                default: 0
+                description: Number of backend groups registered via auto-discovery.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              synced:
+                default: false
+                description: Whether the discovery configuration is synced.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroServiceDiscovery
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: intellaroroutingpolicies.ingress.intellaro.io
+spec:
+  group: ingress.intellaro.io
+  names:
+    categories: []
+    kind: IntellaroRoutingPolicy
+    plural: intellaroroutingpolicies
+    shortNames:
+    - irp
+    singular: intellaroroutingpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.policyType
+      name: Type
+      type: string
+    - jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.synced
+      name: Synced
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for IntellaroRoutingPolicySpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for the IntellaroRoutingPolicy custom resource.
+            properties:
+              aiRouting:
+                description: AI-assisted routing hints.
+                nullable: true
+                properties:
+                  anomalyRerouting:
+                    default: false
+                    description: Enable anomaly-based rerouting.
+                    type: boolean
+                  classRoutes:
+                    description: Classification-to-backend mappings.
+                    items:
+                      description: Mapping from an AI classification label to a backend group.
+                      properties:
+                        backendGroup:
+                          description: Backend group to route to.
+                          type: string
+                        classLabel:
+                          description: Classification label (e.g., "api", "static", "heavy_compute").
+                          type: string
+                      required:
+                      - backendGroup
+                      - classLabel
+                      type: object
+                    type: array
+                  classificationEnabled:
+                    default: false
+                    description: Enable AI request classification for routing.
+                    type: boolean
+                  predictiveEnabled:
+                    default: false
+                    description: Enable AI-predictive backend selection.
+                    type: boolean
+                type: object
+              canary:
+                description: Canary/blue-green deployment configuration.
+                nullable: true
+                properties:
+                  adaptive:
+                    default: false
+                    description: Whether AI should adaptively adjust canary weight based on error rates.
+                    type: boolean
+                  canaryCookie:
+                    description: Cookie that forces canary routing when present.
+                    nullable: true
+                    type: string
+                  canaryGroup:
+                    description: Canary backend group.
+                    type: string
+                  canaryHeader:
+                    description: Header that forces canary routing when present.
+                    nullable: true
+                    type: string
+                  canaryWeight:
+                    default: 0
+                    description: Percentage of traffic to send to canary (0–100).
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  maxAdaptiveWeight:
+                    default: 50
+                    description: Maximum canary weight when adaptive adjustment is enabled.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  primaryGroup:
+                    description: Primary (stable) backend group.
+                    type: string
+                required:
+                - canaryGroup
+                - primaryGroup
+                type: object
+              description:
+                description: Human-readable description of this policy.
+                nullable: true
+                type: string
+              enabled:
+                default: true
+                description: Whether this policy is currently active.
+                type: boolean
+              failover:
+                description: Failover/fallback configuration.
+                nullable: true
+                properties:
+                  consecutiveFailures:
+                    default: 5
+                    description: Consecutive failures before failover.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  errorThreshold:
+                    default: 0.5
+                    description: Error rate threshold (0.0–1.0) that triggers failover.
+                    format: double
+                    type: number
+                  fallbackGroup:
+                    description: Fallback backend group to use when primary is unhealthy.
+                    type: string
+                  primaryGroup:
+                    description: Primary backend group.
+                    type: string
+                  recoverySecs:
+                    default: 60
+                    description: Seconds to wait before attempting to recover to primary.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                required:
+                - fallbackGroup
+                - primaryGroup
+                type: object
+              headers:
+                description: Request/response header manipulation when this policy matches.
+                nullable: true
+                properties:
+                  requestRemove:
+                    description: Headers to remove from the request.
+                    items:
+                      type: string
+                    type: array
+                  requestSet:
+                    description: Headers to add/set on the request.
+                    items:
+                      description: Key-value pair for header manipulation.
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                  responseRemove:
+                    description: Headers to remove from the response.
+                    items:
+                      type: string
+                    type: array
+                  responseSet:
+                    description: Headers to add/set on the response.
+                    items:
+                      description: Key-value pair for header manipulation.
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                type: object
+              matchConditions:
+                description: 'Match conditions: when should this policy activate.'
+                nullable: true
+                properties:
+                  contentType:
+                    description: Match by Content-Type.
+                    nullable: true
+                    type: string
+                  cookies:
+                    description: Match by cookie values.
+                    items:
+                      description: Cookie-based match rule.
+                      properties:
+                        exact:
+                          description: Exact value to match.
+                          nullable: true
+                          type: string
+                        name:
+                          description: Cookie name.
+                          type: string
+                        regex:
+                          description: Regex pattern to match.
+                          nullable: true
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  headers:
+                    description: Match by request headers.
+                    items:
+                      description: Header-based match rule.
+                      properties:
+                        exact:
+                          description: Exact value to match.
+                          nullable: true
+                          type: string
+                        name:
+                          description: Header name (case-insensitive).
+                          type: string
+                        present:
+                          default: false
+                          description: Just check for presence (any value).
+                          type: boolean
+                        regex:
+                          description: Regex pattern to match.
+                          nullable: true
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  methods:
+                    description: Match by HTTP methods.
+                    items:
+                      type: string
+                    type: array
+                  pathPrefix:
+                    description: Match by path prefix.
+                    nullable: true
+                    type: string
+                  pathRegex:
+                    description: Match by path regex.
+                    nullable: true
+                    type: string
+                  queryParams:
+                    description: Match by query parameters.
+                    items:
+                      description: Query parameter match rule.
+                      properties:
+                        exact:
+                          description: Exact value.
+                          nullable: true
+                          type: string
+                        name:
+                          description: Query parameter name.
+                          type: string
+                        regex:
+                          description: Regex pattern.
+                          nullable: true
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  sourceCidrs:
+                    description: Match by source IP CIDR ranges.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              policyType:
+                default: general
+                description: Policy type categorization.
+                enum:
+                - general
+                - canary
+                - slaPriority
+                - mirror
+                - failover
+                - aiAssisted
+                type: string
+              priority:
+                default: 100
+                description: 'Priority (higher = evaluated first). Default: 100.'
+                format: uint32
+                minimum: 0.0
+                type: integer
+              rateLimit:
+                description: Rate limiting specific to this routing policy.
+                nullable: true
+                properties:
+                  key:
+                    default: clientIp
+                    description: 'Rate limit key: how to identify rate-limited entities.'
+                    enum:
+                    - clientIp
+                    - header
+                    - user
+                    - slaTier
+                    type: string
+                  keyHeader:
+                    description: 'Header to key on when `key: header`.'
+                    nullable: true
+                    type: string
+                  maxRequests:
+                    description: Maximum requests allowed in the window.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  windowSecs:
+                    default: 60
+                    description: Window duration in seconds.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                required:
+                - maxRequests
+                type: object
+              slaRouting:
+                description: SLA/tenant-based priority routing.
+                nullable: true
+                properties:
+                  identifier:
+                    description: How to identify the SLA tier.
+                    x-kubernetes-preserve-unknown-fields: true
+                  tiers:
+                    description: Tier definitions, ordered by priority (highest first).
+                    items:
+                      description: Definition of an SLA tier.
+                      properties:
+                        dedicatedBackend:
+                          description: Dedicated backend group for this tier (if any).
+                          nullable: true
+                          type: string
+                        name:
+                          description: Tier name (e.g., "premium", "standard", "free").
+                          type: string
+                        priorityLevel:
+                          default: 100
+                          description: Priority level (higher = more important).
+                          format: uint32
+                          minimum: 0.0
+                          type: integer
+                        rateMultiplier:
+                          default: 1.0
+                          description: Rate limit multiplier (1.0 = default, 2.0 = double the limits).
+                          format: double
+                          type: number
+                        value:
+                          description: Value that identifies this tier (header value, claim value, etc.).
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    type: array
+                required:
+                - identifier
+                - tiers
+                type: object
+              targetRefs:
+                description: 'Target references: which vhosts, routes, or backend groups this policy applies to.'
+                items:
+                  description: Reference to a target resource this policy applies to.
+                  properties:
+                    kind:
+                      description: Kind of the target ("IntellaroVHost", "IntellaroRoute", or "BackendGroup").
+                      type: string
+                    name:
+                      description: Name of the target.
+                      type: string
+                    namespace:
+                      description: Namespace of the target (defaults to policy's namespace).
+                      nullable: true
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              trafficSplit:
+                description: Traffic splitting rules.
+                items:
+                  description: 'Traffic split rule: distribute traffic across multiple backends.'
+                  properties:
+                    backendGroup:
+                      description: Backend group to route to.
+                      type: string
+                    responseHeader:
+                      description: Optional header to set when routed to this backend.
+                      nullable: true
+                      type: string
+                    weight:
+                      description: Weight (0–100). Weights across all rules should sum to 100.
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                  required:
+                  - backendGroup
+                  - weight
+                  type: object
+                type: array
+            type: object
+          status:
+            description: Observed status of the IntellaroRoutingPolicy.
+            nullable: true
+            properties:
+              appliedTargets:
+                default: 0
+                description: Number of targets this policy is applied to.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              conditions:
+                description: Status conditions.
+                items:
+                  description: Common status condition attached to every Intellaro CRD.
+                  properties:
+                    last_transition_time:
+                      description: Last time the condition transitioned.
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable description.
+                      nullable: true
+                      type: string
+                    reason:
+                      description: Human-readable reason for the transition.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '"True", "False", or "Unknown".'
+                      type: string
+                    type:
+                      description: Machine-readable condition type (e.g., "Synced", "Ready", "Error").
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSyncedAt:
+                description: Last time the policy was pushed to the server.
+                nullable: true
+                type: string
+              observedGeneration:
+                default: 0
+                description: Controller-observed generation.
+                format: int64
+                type: integer
+              synced:
+                default: false
+                description: Whether the policy is synced to intellaro-http-server.
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: IntellaroRoutingPolicy
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

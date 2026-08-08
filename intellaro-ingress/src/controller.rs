@@ -33,6 +33,9 @@ use crate::reconciler::{self, ReconcilerContext};
 /// Context shared across all controller instances.
 struct ControllerCtx {
     reconciler_ctx: Arc<ReconcilerContext>,
+    /// Flipped true on any successful reconcile so /readyz reflects a
+    /// functioning controller even if the very first pass failed.
+    ready: crate::health::ReadyFlag,
 }
 
 /// Start all CRD controllers as concurrent tasks.
@@ -44,6 +47,7 @@ pub async fn run(
     kube_client: Client,
     mcp_client: McpClient,
     namespace: Option<String>,
+    ready: crate::health::ReadyFlag,
 ) -> anyhow::Result<()> {
     let reconciler_ctx = Arc::new(ReconcilerContext::new(
         kube_client.clone(),
@@ -53,6 +57,7 @@ pub async fn run(
 
     let ctx = Arc::new(ControllerCtx {
         reconciler_ctx: reconciler_ctx.clone(),
+        ready,
     });
 
     info!("Starting Intellaro CRD controllers");
@@ -253,6 +258,7 @@ async fn reconcile_vhost(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_vhost_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -273,6 +279,7 @@ async fn reconcile_route(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_route_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -293,6 +300,7 @@ async fn reconcile_lb_policy(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_lb_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -313,6 +321,7 @@ async fn reconcile_security_policy(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_security_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -333,6 +342,7 @@ async fn reconcile_cache_policy(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_cache_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -353,6 +363,7 @@ async fn reconcile_service_discovery(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_discovery_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -373,6 +384,7 @@ async fn reconcile_routing_policy(
 
     match reconciler::full_reconcile(&ctx.reconciler_ctx).await {
         Ok(()) => {
+            ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_routing_policy_status(&ctx.reconciler_ctx, &obj, true, None).await;
             Ok(Action::requeue(Duration::from_secs(300)))
         }
@@ -420,6 +432,14 @@ async fn update_vhost_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroVHostStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -448,6 +468,14 @@ async fn update_route_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroRouteStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -474,6 +502,14 @@ async fn update_lb_status(
     let api: Api<IntellaroLBPolicy> = Api::namespaced(ctx.kube_client.clone(), &ns);
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
 
     let status = IntellaroLBPolicyStatus {
         synced,
@@ -502,6 +538,14 @@ async fn update_security_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroSecurityPolicyStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -529,6 +573,14 @@ async fn update_cache_status(
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
+
     let status = IntellaroCachePolicyStatus {
         synced,
         last_synced_at: if synced { Some(now) } else { None },
@@ -555,6 +607,14 @@ async fn update_discovery_status(
     let api: Api<IntellaroServiceDiscovery> = Api::namespaced(ctx.kube_client.clone(), &ns);
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
 
     let status = IntellaroServiceDiscoveryStatus {
         synced,
@@ -585,6 +645,14 @@ async fn update_routing_policy_status(
     let api: Api<IntellaroRoutingPolicy> = Api::namespaced(ctx.kube_client.clone(), &ns);
     let name = obj.name_any();
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Skip no-op status writes: re-patching with a fresh timestamp bumps
+    // resourceVersion and re-triggers our own watch — a reconcile hot loop.
+    if obj.status.as_ref().is_some_and(|s| {
+        s.synced == synced && s.observed_generation == obj.metadata.generation.unwrap_or(0)
+    }) {
+        return;
+    }
 
     let status = IntellaroRoutingPolicyStatus {
         synced,

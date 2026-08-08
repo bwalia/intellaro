@@ -1,0 +1,132 @@
+# Demo workload + Intellaro CRs for testing the ingress controller
+# end-to-end in a cluster:
+#
+#   kubectl apply -f examples/k8s-demo.yaml
+#
+# Two echo backends and a virtual host `demo.intellaro.local` with:
+#   /       → echo-a
+#   /split  → 50/50 weighted split across echo-a and echo-b
+# plus a security policy (IP deny + generous rate limit).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intellaro-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: intellaro-demo
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: echo-a } }
+  template:
+    metadata: { labels: { app: echo-a } }
+    spec:
+      containers:
+        - name: echo
+          image: mendhak/http-https-echo:36
+          env: [{ name: ECHO_INCLUDE_ENV_VARS, value: "0" }]
+          ports: [{ containerPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: intellaro-demo
+spec:
+  selector: { app: echo-a }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: intellaro-demo
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: echo-b } }
+  template:
+    metadata: { labels: { app: echo-b } }
+    spec:
+      containers:
+        - name: echo
+          image: mendhak/http-https-echo:36
+          env: [{ name: ECHO_INCLUDE_ENV_VARS, value: "0" }]
+          ports: [{ containerPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: intellaro-demo
+spec:
+  selector: { app: echo-b }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroVHost
+metadata:
+  name: demo
+  namespace: intellaro-demo
+spec:
+  hostname: demo.intellaro.local
+  aliases:
+    - www.demo.intellaro.local
+  upstream: demo-backend
+  lbPolicyRef: demo-lb
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroLBPolicy
+metadata:
+  name: demo-lb
+  namespace: intellaro-demo
+spec:
+  strategy: round_robin
+  healthCheck:
+    path: /
+    intervalSecs: 10
+    unhealthyThreshold: 3
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: demo-split
+  namespace: intellaro-demo
+spec:
+  vhostRef: demo
+  match:
+    pathPrefix: /split
+  trafficSplit:
+    - backend: { serviceName: echo-a, servicePort: 80 }
+      weight: 50
+    - backend: { serviceName: echo-b, servicePort: 80 }
+      weight: 50
+  backend: { serviceName: echo-a, servicePort: 80 }
+  priority: 200
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: demo-root
+  namespace: intellaro-demo
+spec:
+  vhostRef: demo
+  match:
+    pathPrefix: /
+  backend: { serviceName: echo-a, servicePort: 80 }
+  timeoutSecs: 30
+  priority: 100
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroSecurityPolicy
+metadata:
+  name: demo-security
+  namespace: intellaro-demo
+spec:
+  ipBlock:
+    - 203.0.113.0/24
+  rateLimit:
+    enabled: true
+    maxRequests: 10000
+    windowSecs: 60

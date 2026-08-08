@@ -105,6 +105,10 @@ pub struct RateLimitPolicy {
     #[serde(default)]
     pub key: RateLimitKey,
 
+    /// Header to key on when `key: header`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_header: Option<String>,
+
     /// HTTP status code to return when rate limited (default: 429).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_code: Option<u16>,
@@ -115,14 +119,19 @@ fn default_window() -> u64 {
 }
 
 /// Key used to identify rate-limit buckets.
+///
+/// All variants are plain strings so the generated CRD schema is a
+/// consistent string enum (mixed string/object variants break Kubernetes
+/// structural schema generation). For `header`, the header name lives in
+/// the sibling `keyHeader` field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKey {
     /// Rate limit by client IP address.
     #[default]
     ClientIp,
-    /// Rate limit by a specific request header value.
-    Header(String),
+    /// Rate limit by a request header value (see `keyHeader`).
+    Header,
     /// Rate limit by authenticated user identity (from JWT sub claim).
     User,
 }

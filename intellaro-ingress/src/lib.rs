@@ -28,6 +28,12 @@ use tracing::{error, info};
 /// Callers are responsible for initializing tracing first (see
 /// [`logging::init`]).
 pub async fn run(ctrl_config: config::ControllerConfig) -> anyhow::Result<()> {
+    // The unified binary links rustls with both `ring` (kube/reqwest) and
+    // `aws-lc-rs` (data-plane TLS) compiled in; rustls then refuses to pick
+    // a process-level CryptoProvider automatically. Install one explicitly
+    // before any TLS client is built.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     info!(
         mcp_url = %ctrl_config.mcp_url,
         namespace = ?ctrl_config.namespace,
@@ -99,6 +105,7 @@ pub async fn run(ctrl_config: config::ControllerConfig) -> anyhow::Result<()> {
         kube_client,
         mcp_client,
         ctrl_config.namespace,
+        ready_flag.clone(),
     ));
 
     // Wait for shutdown signal.
