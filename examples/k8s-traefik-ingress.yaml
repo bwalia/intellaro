@@ -1,0 +1,60 @@
+# Front the Intellaro data plane with the cluster's existing traefik
+# ingress (which owns 80/443), so the test host works without NodePort:
+#
+#   traefik :80/:443 ──▶ intellaro-dataplane :8080 ──▶ echo backends
+#
+# Traefik preserves the Host header, so Intellaro routes on its own
+# vhost for the same hostname (chained-ingress / migration topology).
+#
+# Apply:  kubectl apply -f examples/k8s-traefik-ingress.yaml
+# Test:   curl --resolve intellaro-pop.fictionally.org:80:192.168.1.140 \
+#              http://intellaro-pop.fictionally.org/
+#   (or /etc/hosts: 192.168.1.140 intellaro-pop.fictionally.org)
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: intellaro-pop
+  namespace: intellaro
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: intellaro-pop.fictionally.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: intellaro-dataplane
+                port:
+                  name: http
+---
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroVHost
+metadata:
+  name: pop
+  namespace: intellaro-demo
+spec:
+  hostname: intellaro-pop.fictionally.org
+  upstream: pop-backend
+  lbPolicyRef: demo-lb
+---
+# Mirror of the systemd POP demo: weighted 2:1 across the echo backends.
+apiVersion: ingress.intellaro.io/v1alpha1
+kind: IntellaroRoute
+metadata:
+  name: pop-root
+  namespace: intellaro-demo
+spec:
+  vhostRef: pop
+  match:
+    pathPrefix: /
+  trafficSplit:
+    - backend: { serviceName: echo-a, servicePort: 80 }
+      weight: 2
+    - backend: { serviceName: echo-b, servicePort: 80 }
+      weight: 1
+  backend: { serviceName: echo-a, servicePort: 80 }
+  timeoutSecs: 30
+  priority: 100
