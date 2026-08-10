@@ -24,8 +24,13 @@ dataplane:
     # Extra service annotations (e.g. external-dns hostname/target).
     annotations: {}
 
+  # API key protecting the management API (and the dashboard's data
+  # calls). REQUIRED before exposing the MCP port via an Ingress.
+  mcpApiKey: ""
+
   # Legacy flat ServerConfig (management_api is not yet part of the
-  # intellaro.io/v1 schema). Override with your own config as needed.
+  # intellaro.io/v1 schema). Rendered with `tpl`, so it may reference
+  # values. Override with your own config as needed.
   config: |
     listeners:
       - address: "0.0.0.0:8080"
@@ -38,6 +43,9 @@ dataplane:
       ops_address: "0.0.0.0:9090"
     management_api:
       address: "0.0.0.0:9091"
+    {{- if .Values.dataplane.mcpApiKey }}
+      api_key: {{ .Values.dataplane.mcpApiKey | quote }}
+    {{- end }}
 
   resources:
     requests:
@@ -77,3 +85,13 @@ serviceAccount:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ── Dashboard Ingress ─────────────────────────────────────────────────
+# Exposes the built-in System Health Dashboard (and the management API
+# it fronts) through an existing ingress class. Refuses to render
+# unless dataplane.mcpApiKey is set — never expose an unauthenticated
+# management API.
+dashboardIngress:
+  enabled: false
+  host: ""
+  className: traefik

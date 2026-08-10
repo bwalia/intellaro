@@ -1,0 +1,25 @@
+{{- if .Values.dashboardIngress.enabled }}
+{{- if not .Values.dataplane.mcpApiKey }}
+{{- fail "dashboardIngress requires dataplane.mcpApiKey — never expose an unauthenticated management API" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "intellaro.fullname" . }}-dashboard
+  labels:
+    {{- include "intellaro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  ingressClassName: {{ .Values.dashboardIngress.className }}
+  rules:
+    - host: {{ required "dashboardIngress.host is required" .Values.dashboardIngress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "intellaro.fullname" . }}-dataplane
+                port:
+                  name: mcp
+{{- end }}
