@@ -8,5 +8,5 @@ metadata:
     app.kubernetes.io/component: dataplane
 data:
   config.yaml: |
-    {{- .Values.dataplane.config | nindent 4 }}
+    {{- tpl .Values.dataplane.config . | nindent 4 }}
 {{- end }}

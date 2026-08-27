@@ -89,6 +89,10 @@ pub struct RouteMatch {
     /// Header-based matching conditions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header_matches: Vec<HeaderMatch>,
+
+    /// Client source IPs/CIDRs to match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_cidrs: Vec<String>,
 }
 
 /// Header matching condition.

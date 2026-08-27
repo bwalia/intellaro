@@ -17,18 +17,20 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use base64::Engine as _;
 use intellaro_config::{
-    ActiveHealthCheck, BackoffStrategy, ConfigSet, Gateway, ListenerProtocol, LoadBalancing,
-    PathMatchType, Route, WafMode, WafPolicy,
+    ActiveHealthCheck, BackoffStrategy, ConfigSet, Gateway, HeaderOps, ListenerProtocol,
+    LoadBalancing, PathMatchType, Route, RouteAction, WafMode, WafPolicy,
 };
 use intellaro_http_router::config::{
-    BalancerConfig, BalancerStrategy, MatchConfig, RouterConfig, RoutingRule,
+    BalancerConfig, BalancerStrategy, HeaderManipulation, MatchConfig, RouterConfig, RoutingRule,
+    RuleAction,
 };
 
 use crate::config::{
-    BackendServer, CacheConfig, CircuitBreakerConfig, ConfigError, HealthCheckConfig,
-    JwtConfig, ListenerConfig, LoggingConfig, RateLimitConfig, RetryConfig, SecurityConfig,
-    ServerConfig, TlsConfig, UpstreamConfig,
+    BackendServer, CacheConfig, CircuitBreakerConfig, ConfigError, FallbackConfig,
+    HealthCheckConfig, JwtConfig, ListenerConfig, LoggingConfig, RateLimitConfig, RetryConfig,
+    SecurityConfig, ServerConfig, TlsConfig, UpstreamConfig,
 };
 
 /// Result of compiling a v1 config set.
@@ -82,12 +84,18 @@ pub fn compile(set: &ConfigSet) -> Result<CompiledConfig, ConfigError> {
 
         for host in &gateway.spec.hosts {
             for (idx, route) in host.routes.iter().enumerate() {
-                let group = match &route.upstream_ref {
-                    Some(name) => name.clone(),
-                    None => {
-                        let name = synthesized_upstream_name(&gateway.metadata.name, &host.name, idx);
-                        upstreams.push(inline_upstream(&name, route));
-                        name
+                let group = if route.action.is_some() {
+                    // Static/redirect routes never reach a backend.
+                    String::new()
+                } else {
+                    match &route.upstream_ref {
+                        Some(name) => name.clone(),
+                        None => {
+                            let name =
+                                synthesized_upstream_name(&gateway.metadata.name, &host.name, idx);
+                            upstreams.push(inline_upstream(&name, route));
+                            name
+                        }
                     }
                 };
 
@@ -98,6 +106,19 @@ pub fn compile(set: &ConfigSet) -> Result<CompiledConfig, ConfigError> {
 
     // ── Security policy ──────────────────────────────────────────────
     let security = compile_security(set, &mut warnings);
+
+    // First gateway fallback page (if any) becomes the global fallback.
+    let fallback = set
+        .gateways
+        .iter()
+        .find_map(|g| g.spec.fallback.as_ref())
+        .map(|fb| FallbackConfig {
+            mode: "not_found".to_string(),
+            status: fb.status,
+            body: fb.body.clone(),
+            content_type: fb.content_type.clone(),
+        })
+        .unwrap_or_default();
 
     let config = ServerConfig {
         listeners,
@@ -116,6 +137,7 @@ pub fn compile(set: &ConfigSet) -> Result<CompiledConfig, ConfigError> {
             ..RouterConfig::default()
         }),
         tenants: Vec::new(),
+        fallback,
     };
 
     Ok(CompiledConfig { config, warnings })
@@ -237,8 +259,12 @@ fn to_routing_rule(
             query_params: HashMap::new(),
             cookies: HashMap::new(),
             content_type: None,
+            source_cidrs: route.route_match.source_cidrs.clone(),
         },
         backend_group,
+        action: route.action.as_ref().map(to_rule_action),
+        strip_path_prefix: route.rewrite.as_ref().map(|r| r.strip_prefix.clone()),
+        rewrite_prefix_with: route.rewrite.as_ref().and_then(|r| r.replace_with.clone()),
         balancer: Some(BalancerConfig {
             strategy: to_balancer_strategy(route.load_balancing),
             sticky: None,
@@ -249,9 +275,62 @@ fn to_routing_rule(
             .as_ref()
             .and_then(|t| t.read)
             .map(|d| d.as_secs()),
-        headers: None,
+        headers: to_header_manipulation(
+            route.request_headers.as_ref(),
+            route.response_headers.as_ref(),
+        ),
         enabled: true,
     }
+}
+
+/// Map the v1 action onto the router's rule action, decoding base64
+/// bodies (WSLProxy stored custom pages base64-encoded).
+fn to_rule_action(action: &RouteAction) -> RuleAction {
+    match action {
+        RouteAction::Static {
+            status,
+            body,
+            body_base64,
+            content_type,
+        } => {
+            let body = body.clone().or_else(|| {
+                body_base64.as_ref().map(|b64| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_default()
+                })
+            });
+            RuleAction::Static {
+                status: *status,
+                body,
+                content_type: content_type.clone(),
+            }
+        }
+        RouteAction::Redirect { location, status } => RuleAction::Redirect {
+            location: location.clone(),
+            status: *status,
+        },
+    }
+}
+
+fn to_header_manipulation(
+    request: Option<&HeaderOps>,
+    response: Option<&HeaderOps>,
+) -> Option<HeaderManipulation> {
+    if request.is_none() && response.is_none() {
+        return None;
+    }
+    Some(HeaderManipulation {
+        request_set: request
+            .map(|h| h.set.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default(),
+        response_set: response
+            .map(|h| h.set.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default(),
+        request_remove: request.map(|h| h.remove.clone()).unwrap_or_default(),
+        response_remove: response.map(|h| h.remove.clone()).unwrap_or_default(),
+    })
 }
 
 /// Deterministic selection: Exact beats Prefix beats Regex, and within a

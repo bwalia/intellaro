@@ -29,6 +29,9 @@ tracing = "0.1"
 # Regex for path matching
 regex = "1"
 
+# CIDR parsing for source-IP match conditions
+ipnet = "2"
+
 # Hashing for consistent hash and sticky sessions
 ahash = "0.8"
 

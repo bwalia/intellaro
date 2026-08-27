@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "intellaro.labels" . | nindent 4 }}
     app.kubernetes.io/component: dataplane
+  {{- with .Values.dataplane.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.dataplane.service.type }}
   selector:
@@ -16,6 +20,9 @@ spec:
     - name: http
       port: {{ .Values.dataplane.service.httpPort }}
       targetPort: http
+      {{- if and (eq .Values.dataplane.service.type "NodePort") .Values.dataplane.service.httpNodePort }}
+      nodePort: {{ .Values.dataplane.service.httpNodePort }}
+      {{- end }}
     - name: ops
       port: {{ .Values.dataplane.service.opsPort }}
       targetPort: ops

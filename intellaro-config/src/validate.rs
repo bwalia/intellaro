@@ -39,6 +39,15 @@ pub fn validate(set: &ConfigSet) -> Result<(), ConfigV1Error> {
             errors.push(format!("gateway {gw_name:?}: at least one host is required"));
         }
 
+        if let Some(fb) = &gw.spec.fallback {
+            if !(100..=599).contains(&fb.status) {
+                errors.push(format!(
+                    "gateway {gw_name:?}: fallback status {} is not a valid HTTP status",
+                    fb.status
+                ));
+            }
+        }
+
         let mut listener_names: HashSet<&str> = HashSet::new();
         for listener in &gw.spec.listeners {
             let ctx = format!("gateway {gw_name:?} listener {:?}", listener.name);
@@ -195,7 +204,10 @@ fn validate_route(
             errors.push(format!("{ctx}: backends and upstreamRef are mutually exclusive"))
         }
         (None, true) => {
-            errors.push(format!("{ctx}: either backends or upstreamRef is required"))
+            // Action routes (static/redirect) never reach a backend.
+            if route.action.is_none() {
+                errors.push(format!("{ctx}: either backends or upstreamRef is required"))
+            }
         }
         (Some(name), true) => {
             if !upstream_names.contains(name.as_str()) {
@@ -203,6 +215,44 @@ fn validate_route(
             }
         }
         (None, false) => validate_backends(ctx, &route.backends, errors),
+    }
+
+    match &route.action {
+        Some(RouteAction::Static { status, body, body_base64, .. }) => {
+            if !(100..=599).contains(status) {
+                errors.push(format!("{ctx}: action status {status} is not a valid HTTP status"));
+            }
+            if body.is_some() && body_base64.is_some() {
+                errors.push(format!("{ctx}: body and bodyBase64 are mutually exclusive"));
+            }
+            if let Some(b64) = body_base64 {
+                use base64::Engine as _;
+                if base64::engine::general_purpose::STANDARD.decode(b64).is_err() {
+                    errors.push(format!("{ctx}: bodyBase64 is not valid base64"));
+                }
+            }
+        }
+        Some(RouteAction::Redirect { location, status }) => {
+            if location.is_empty() {
+                errors.push(format!("{ctx}: redirect location must not be empty"));
+            }
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                errors.push(format!("{ctx}: redirect status must be 301/302/303/307/308, got {status}"));
+            }
+        }
+        None => {}
+    }
+
+    if let Some(rewrite) = &route.rewrite {
+        if !rewrite.strip_prefix.starts_with('/') {
+            errors.push(format!("{ctx}: rewrite.stripPrefix must start with '/'"));
+        }
+    }
+
+    for cidr in &route.route_match.source_cidrs {
+        if !looks_like_ip_or_cidr(cidr) {
+            errors.push(format!("{ctx}: sourceCidr {cidr:?} is not a valid IP or CIDR"));
+        }
     }
 
     if route.route_match.path.match_type != PathMatchType::Regex

@@ -21,8 +21,23 @@ use reqwest::Client;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+use intellaro_http_router::config::HeaderManipulation;
+
 use crate::config::{BackendServer, HealthCheckConfig, UpstreamConfig};
 use crate::server::BoxBody;
+
+/// Per-request forwarding options.
+#[derive(Debug, Clone)]
+pub struct ForwardOptions {
+    pub client_addr: SocketAddr,
+    /// Scheme the client used ("http"/"https"); sets X-Forwarded-Proto
+    /// when the header is not already present (chained-proxy safe).
+    pub scheme: &'static str,
+    /// Replacement path (+query) after rule-level strip/rewrite.
+    pub path_override: Option<String>,
+    /// Rule-level request header manipulation.
+    pub headers: Option<HeaderManipulation>,
+}
 
 /// Consecutive transport/5xx failures before a backend is passively ejected.
 const PASSIVE_MAX_FAILS: u32 = 3;
@@ -178,7 +193,7 @@ impl ProxyEngine {
         &self,
         req: &Request<B>,
         body: Bytes,
-        client_addr: SocketAddr,
+        opts: &ForwardOptions,
     ) -> Result<Response<BoxBody>, ProxyError> {
         let upstream_name = self.resolve_upstream(req);
 
@@ -193,7 +208,7 @@ impl ProxyEngine {
 
         backend.active_connections.fetch_add(1, Ordering::Relaxed);
         let result = self
-            .send_upstream(req, &backend.server.address, body, client_addr)
+            .send_upstream(req, &backend.server.address, body, opts)
             .await;
         backend.active_connections.fetch_sub(1, Ordering::Relaxed);
 
@@ -213,11 +228,11 @@ impl ProxyEngine {
         req: &Request<B>,
         backend_address: &str,
         body: Bytes,
-        client_addr: SocketAddr,
+        opts: &ForwardOptions,
     ) -> Result<Response<BoxBody>, ProxyError> {
         metrics::counter!("proxy_requests_total", "backend" => backend_address.to_string())
             .increment(1);
-        self.send_upstream(req, backend_address, body, client_addr).await
+        self.send_upstream(req, backend_address, body, opts).await
     }
 
     /// Perform the actual upstream exchange (buffered, via reqwest).
@@ -226,21 +241,20 @@ impl ProxyEngine {
         req: &Request<B>,
         backend_address: &str,
         body: Bytes,
-        client_addr: SocketAddr,
+        opts: &ForwardOptions,
     ) -> Result<Response<BoxBody>, ProxyError> {
-        let target_url = format!(
-            "http://{}{}",
-            backend_address,
+        let path = opts.path_override.as_deref().unwrap_or_else(|| {
             req.uri()
                 .path_and_query()
                 .map(|pq| pq.as_str())
                 .unwrap_or("/")
-        );
+        });
+        let target_url = format!("http://{backend_address}{path}");
 
         let result = self
             .http_client
             .request(req.method().clone(), &target_url)
-            .headers(build_upstream_headers(req.headers(), client_addr))
+            .headers(build_upstream_headers(req.headers(), opts))
             .body(body)
             .send()
             .await;
@@ -461,8 +475,9 @@ fn is_hop_by_hop(name: &str) -> bool {
 /// WSLProxy-parity `X-Origin-IP`.
 fn build_upstream_headers(
     headers: &hyper::HeaderMap,
-    client_addr: SocketAddr,
+    opts: &ForwardOptions,
 ) -> reqwest::header::HeaderMap {
+    let client_addr = opts.client_addr;
     let mut map = reqwest::header::HeaderMap::new();
 
     for (key, value) in headers.iter() {
@@ -495,6 +510,31 @@ fn build_upstream_headers(
     if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
         if let Ok(val) = reqwest::header::HeaderValue::from_str(host) {
             map.insert("x-forwarded-host", val);
+        }
+    }
+
+    // Preserve an inbound X-Forwarded-Proto (chained proxies know the
+    // original scheme); otherwise stamp the scheme this listener saw.
+    if !map.contains_key("x-forwarded-proto") {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(opts.scheme) {
+            map.insert("x-forwarded-proto", val);
+        }
+    }
+
+    // Rule-level request header manipulation.
+    if let Some(hm) = &opts.headers {
+        for (name, value) in &hm.request_set {
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                map.insert(n, v);
+            }
+        }
+        for name in &hm.request_remove {
+            if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+                map.remove(n);
+            }
         }
     }
 
@@ -595,7 +635,13 @@ mod tests {
         headers.insert("x-custom", "yes".parse().unwrap());
         headers.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
 
-        let out = build_upstream_headers(&headers, "203.0.113.9:55555".parse().unwrap());
+        let opts = ForwardOptions {
+            client_addr: "203.0.113.9:55555".parse().unwrap(),
+            scheme: "https",
+            path_override: None,
+            headers: None,
+        };
+        let out = build_upstream_headers(&headers, &opts);
 
         assert!(out.get("connection").is_none());
         assert!(out.get("transfer-encoding").is_none());
@@ -607,5 +653,6 @@ mod tests {
             out.get("x-forwarded-for").unwrap(),
             "198.51.100.7, 203.0.113.9"
         );
+        assert_eq!(out.get("x-forwarded-proto").unwrap(), "https");
     }
 }
