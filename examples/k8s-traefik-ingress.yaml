@@ -8,7 +8,7 @@
 #
 # Apply:  kubectl apply -f examples/k8s-traefik-ingress.yaml
 # Test:   https://intellaro-pop.fictionally.org/   (public DNS is live:
-#         Cloudflare -> pop0.wslproxy.com edge (TLS, force-HTTPS)
+#         Cloudflare -> lon1.pop0.uk edge (TLS, force-HTTPS)
 #         -> k3s1 traefik -> intellaro -> backends)
 #   LAN shortcut without the edge hop:
 #         curl --resolve intellaro-pop.fictionally.org:80:192.168.1.140 \
