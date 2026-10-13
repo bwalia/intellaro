@@ -34,6 +34,10 @@ spec:
           env:
             - name: INTELLARO_MCP_URL
               value: {{ include "intellaro.mcpUrl" . | quote }}
+            {{- if .Values.dataplane.mcpApiKey }}
+            - name: INTELLARO_MCP_API_KEY
+              value: {{ .Values.dataplane.mcpApiKey | quote }}
+            {{- end }}
             {{- if .Values.ingressController.watchNamespace }}
             - name: INTELLARO_NAMESPACE
               value: {{ .Values.ingressController.watchNamespace | quote }}

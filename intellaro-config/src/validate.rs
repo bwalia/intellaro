@@ -2,7 +2,7 @@
 //!
 //! The loader guarantees shape; this module guarantees meaning: unique
 //! names, resolvable references, sane ports/weights, and Phase-0 support
-//! boundaries (e.g. ACME and TCP probes are schema-reserved, not yet live).
+//! boundaries (e.g. TCP probes are schema-reserved, not yet live).
 
 use std::collections::HashSet;
 
@@ -37,6 +37,15 @@ pub fn validate(set: &ConfigSet) -> Result<(), ConfigV1Error> {
         }
         if gw.spec.hosts.is_empty() {
             errors.push(format!("gateway {gw_name:?}: at least one host is required"));
+        }
+
+        if let Some(fb) = &gw.spec.fallback {
+            if !(100..=599).contains(&fb.status) {
+                errors.push(format!(
+                    "gateway {gw_name:?}: fallback status {} is not a valid HTTP status",
+                    fb.status
+                ));
+            }
         }
 
         let mut listener_names: HashSet<&str> = HashSet::new();
@@ -87,6 +96,13 @@ pub fn validate(set: &ConfigSet) -> Result<(), ConfigV1Error> {
             }
             if host.routes.is_empty() {
                 errors.push(format!("{hctx}: at least one route is required"));
+            }
+            if let Some(hsts) = &host.hsts {
+                if hsts.preload && (!hsts.include_subdomains || hsts.max_age.as_secs() < 31_536_000) {
+                    errors.push(format!(
+                        "{hctx}: hsts.preload requires includeSubdomains and maxAge of at least 1 year"
+                    ));
+                }
             }
 
             for (idx, route) in host.routes.iter().enumerate() {
@@ -168,12 +184,26 @@ fn validate_tls(ctx: &str, tls: &TlsSettings, errors: &mut Vec<String>) {
     let has_static = tls.cert_path.is_some() && tls.key_path.is_some();
     let acme_on = tls.acme.as_ref().is_some_and(|a| a.enabled);
 
-    if acme_on && !has_static {
+    if tls.cert_path.is_some() != tls.key_path.is_some() {
+        errors.push(format!("{ctx}: certPath and keyPath must be set together"));
+    } else if !acme_on && !has_static {
         errors.push(format!(
-            "{ctx}: ACME automation lands in Phase 1 — provide certPath/keyPath for now"
+            "{ctx}: certPath and keyPath are required for HTTPS unless acme.enabled"
         ));
-    } else if !has_static {
-        errors.push(format!("{ctx}: certPath and keyPath are required for HTTPS"));
+    }
+    if let Some(acme) = tls.acme.as_ref().filter(|a| a.enabled) {
+        if let Some(url) = &acme.directory_url {
+            if !url.starts_with("https://") {
+                errors.push(format!("{ctx}: acme.directoryUrl must be an https:// URL"));
+            }
+        }
+        for domain in &acme.domains {
+            if domain.starts_with("*.") {
+                errors.push(format!(
+                    "{ctx}: acme domain {domain:?}: wildcards need DNS-01, which is not supported yet"
+                ));
+            }
+        }
     }
 
     if let Some(v) = &tls.min_version {
@@ -195,7 +225,10 @@ fn validate_route(
             errors.push(format!("{ctx}: backends and upstreamRef are mutually exclusive"))
         }
         (None, true) => {
-            errors.push(format!("{ctx}: either backends or upstreamRef is required"))
+            // Action routes (static/redirect) never reach a backend.
+            if route.action.is_none() {
+                errors.push(format!("{ctx}: either backends or upstreamRef is required"))
+            }
         }
         (Some(name), true) => {
             if !upstream_names.contains(name.as_str()) {
@@ -203,6 +236,44 @@ fn validate_route(
             }
         }
         (None, false) => validate_backends(ctx, &route.backends, errors),
+    }
+
+    match &route.action {
+        Some(RouteAction::Static { status, body, body_base64, .. }) => {
+            if !(100..=599).contains(status) {
+                errors.push(format!("{ctx}: action status {status} is not a valid HTTP status"));
+            }
+            if body.is_some() && body_base64.is_some() {
+                errors.push(format!("{ctx}: body and bodyBase64 are mutually exclusive"));
+            }
+            if let Some(b64) = body_base64 {
+                use base64::Engine as _;
+                if base64::engine::general_purpose::STANDARD.decode(b64).is_err() {
+                    errors.push(format!("{ctx}: bodyBase64 is not valid base64"));
+                }
+            }
+        }
+        Some(RouteAction::Redirect { location, status }) => {
+            if location.is_empty() {
+                errors.push(format!("{ctx}: redirect location must not be empty"));
+            }
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                errors.push(format!("{ctx}: redirect status must be 301/302/303/307/308, got {status}"));
+            }
+        }
+        None => {}
+    }
+
+    if let Some(rewrite) = &route.rewrite {
+        if !rewrite.strip_prefix.starts_with('/') {
+            errors.push(format!("{ctx}: rewrite.stripPrefix must start with '/'"));
+        }
+    }
+
+    for cidr in &route.route_match.source_cidrs {
+        if !looks_like_ip_or_cidr(cidr) {
+            errors.push(format!("{ctx}: sourceCidr {cidr:?} is not a valid IP or CIDR"));
+        }
     }
 
     if route.route_match.path.match_type != PathMatchType::Regex
@@ -236,8 +307,21 @@ fn validate_backends(ctx: &str, backends: &[Backend], errors: &mut Vec<String>) 
         if backend.weight == 0 {
             errors.push(format!("{ctx}: backend {:?} weight must be >= 1", backend.address));
         }
-        // host:port shape — permissive on host (DNS names allowed), strict on port.
-        match backend.address.rsplit_once(':') {
+        // [http(s)://]host:port — permissive on host (DNS names allowed),
+        // strict on scheme and port.
+        let address = backend
+            .address
+            .strip_prefix("https://")
+            .or_else(|| backend.address.strip_prefix("http://"))
+            .unwrap_or(&backend.address);
+        if address.contains("://") || address.contains('/') {
+            errors.push(format!(
+                "{ctx}: backend {:?} must be host:port or https://host:port (no other schemes or paths)",
+                backend.address
+            ));
+            continue;
+        }
+        match address.rsplit_once(':') {
             Some((host, port)) if !host.is_empty() => {
                 if port.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
                     errors.push(format!(

@@ -260,7 +260,7 @@ async fn reconcile_vhost(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_vhost_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(vhost = %name, error = %e, "Reconciliation failed");
@@ -281,7 +281,7 @@ async fn reconcile_route(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_route_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(route = %name, error = %e, "Reconciliation failed");
@@ -302,7 +302,7 @@ async fn reconcile_lb_policy(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_lb_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(policy = %name, error = %e, "Reconciliation failed");
@@ -323,7 +323,7 @@ async fn reconcile_security_policy(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_security_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(policy = %name, error = %e, "Reconciliation failed");
@@ -344,7 +344,7 @@ async fn reconcile_cache_policy(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_cache_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(policy = %name, error = %e, "Reconciliation failed");
@@ -365,7 +365,7 @@ async fn reconcile_service_discovery(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_discovery_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(discovery = %name, error = %e, "Reconciliation failed");
@@ -386,7 +386,7 @@ async fn reconcile_routing_policy(
         Ok(()) => {
             ctx.ready.store(true, std::sync::atomic::Ordering::Relaxed);
             update_routing_policy_status(&ctx.reconciler_ctx, &obj, true, None).await;
-            Ok(Action::requeue(Duration::from_secs(300)))
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
         Err(e) => {
             error!(policy = %name, error = %e, "Reconciliation failed");

@@ -124,8 +124,8 @@ state (Phase 1 carries it over by backend key).
 ## Request pipeline
 
 ```
-client ──▶ listener (HTTP/1.1, h2c; TLS terminate when configured)
-             │ buffer request body (bounded, 16 MiB) for replay across retries
+client ──▶ listener (HTTP/1.1, h2c; TLS terminate when configured; upgrades enabled)
+             │ request body held unread — streamed upstream on forward
              ▼
         1. security engine        IP allow/deny → rate limit → JWT      [fail-closed]
         2. cache lookup           GET/HEAD short-circuit (TTL, SWR)
@@ -133,17 +133,34 @@ client ──▶ listener (HTTP/1.1, h2c; TLS terminate when configured)
         4. routing engine         host/path/method/header match → backend group
              │                     canary, sticky, priority tiers
              ▼
-        5. proxy                  strip hop-by-hop headers
-                                   + X-Forwarded-For / X-Forwarded-Host / X-Origin-IP
+        5. proxy                  strip hop-by-hop headers (+ any named in Connection)
+                                   Host preserved; + X-Forwarded-For / -Host / -Proto / X-Origin-IP
                                    circuit breaker → retry w/ backoff → LB pick
              ▼
-        upstream backend  ──▶ response (hop-by-hop stripped) ──▶ cache store ──▶ client
+        upstream backend  ──▶ response (hop-by-hop stripped) ──▶ [cache tee] ──▶ client
 ```
 
-The Phase-0 data plane is **store-and-forward** (bodies buffered both ways,
-via a pooled HTTP client). The streaming hyper-conn rewrite — required for
-WebSocket/gRPC pass-through, SSE, and the <1 ms P50 overhead target — is the
-first Phase 1 milestone.
+The data plane **streams** in both directions over a pooled hyper client:
+
+* **Request bodies** are forwarded as they arrive (no size cap). They are
+  buffered (16 MiB cap, 413 above) only when the upstream has a retry
+  policy, since a replay needs the bytes.
+* **Response bodies** are relayed frame by frame, so SSE, long polls and
+  large downloads flow live, and HTTP trailers pass through. Only responses
+  the cache will actually store are buffered (≤ 8 MiB; larger bodies are
+  relayed uncached, `text/event-stream` is never buffered).
+* **Upgrades** (WebSocket and other HTTP/1.1 `Upgrade`s): the request goes
+  upstream with `Connection: upgrade`; on `101` the proxy relays the
+  handshake headers and splices the two sockets (`proxy_upgraded_connections`
+  gauge).
+* **gRPC** (`content-type: application/grpc`) goes upstream over HTTP/2
+  prior knowledge (h2c) with `te: trailers`, so `grpc-status` trailers reach
+  the client.
+* **Timeouts**: connect 5 s; route `timeouts.read` bounds the wait for
+  response headers (504 on expiry, default 30 s). Streaming bodies and
+  tunnels are not time-bounded.
+* Backend connection counts (least-connections) are held until the response
+  body or tunnel finishes, not just until headers arrive.
 
 ## Health & resilience
 
@@ -156,7 +173,8 @@ first Phase 1 milestone.
   (`proxy_fail_open_total`) and warning log.
 * **Circuit breaker** — per-upstream failure threshold, open/half-open state.
 * **Retries** — per-upstream max retries, retryable status codes,
-  exponential/linear/constant backoff. Bodies are buffered, so replays are safe.
+  exponential/linear/constant backoff. Request bodies are buffered (bounded)
+  only on upstreams with a retry policy, so replays are safe.
 
 ## Fail-open vs fail-closed
 
@@ -182,7 +200,8 @@ first Phase 1 milestone.
 ## Security posture
 
 * Memory-safe Rust throughout; rustls for TLS (no OpenSSL on the request path).
-* Request bodies bounded (413 above 16 MiB) before any buffering.
+* Request bodies are never buffered unbounded: they stream, or — on
+  retry-enabled upstreams — are capped at 16 MiB (413 above).
 * Hop-by-hop headers stripped in both directions (RFC 9110 §7.6.1).
 * Mock auth from the prototypes is **not** ported; the management API uses
   API key + RBAC, and platform RBAC/OIDC hardening is tracked for Phase 2.

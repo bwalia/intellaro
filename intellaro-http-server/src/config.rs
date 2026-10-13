@@ -59,6 +59,102 @@ pub struct ServerConfig {
     /// Multi-tenancy configuration.
     #[serde(default)]
     pub tenants: Vec<crate::tenant::TenantConfig>,
+
+    /// Behavior when no routing rule matches a request.
+    #[serde(default)]
+    pub fallback: FallbackConfig,
+
+    /// Per-host transport policies (force-HTTPS, HSTS).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_policies: Vec<HostPolicy>,
+}
+
+/// Most specific policy for `host` (port already stripped): exact name,
+/// then the longest matching `*.suffix` wildcard, then `*`.
+pub fn lookup_host_policy<'a>(policies: &'a [HostPolicy], host: &str) -> Option<&'a HostPolicy> {
+    let mut best: Option<(&HostPolicy, usize)> = None;
+    for policy in policies {
+        let rank = if policy.host.eq_ignore_ascii_case(host) {
+            usize::MAX
+        } else if policy.host == "*" {
+            0
+        } else if let Some(suffix) = policy.host.strip_prefix("*.") {
+            let matches = host.len() > suffix.len() + 1
+                && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+                && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
+            if !matches {
+                continue;
+            }
+            suffix.len() + 1
+        } else {
+            continue;
+        };
+        if best.map_or(true, |(_, r)| rank > r) {
+            best = Some((policy, rank));
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+/// Transport policy for one host pattern (exact, `*.example.com`, or `*`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostPolicy {
+    pub host: String,
+
+    /// Redirect plain-HTTP requests to HTTPS.
+    #[serde(default)]
+    pub force_https: bool,
+
+    /// Port for the HTTPS redirect target; omitted from the URL when 443
+    /// or unset (TLS terminated in front of the proxy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_port: Option<u16>,
+
+    /// Pre-rendered `Strict-Transport-Security` value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsts: Option<String>,
+}
+
+/// Behavior for requests that match no routing rule
+/// (WSLProxy `no_server` / `no_rule` parity).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackConfig {
+    /// "first_upstream" (legacy behavior: proxy to the first upstream)
+    /// or "not_found" (serve the fallback page below).
+    #[serde(default = "default_fallback_mode")]
+    pub mode: String,
+
+    /// Status code for the fallback page.
+    #[serde(default = "default_fallback_status")]
+    pub status: u16,
+
+    /// Custom page body; a minimal branded page when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+
+    #[serde(default = "default_fallback_content_type")]
+    pub content_type: String,
+}
+
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_fallback_mode(),
+            status: default_fallback_status(),
+            body: None,
+            content_type: default_fallback_content_type(),
+        }
+    }
+}
+
+fn default_fallback_mode() -> String {
+    "first_upstream".to_string()
+}
+fn default_fallback_status() -> u16 {
+    404
+}
+fn default_fallback_content_type() -> String {
+    "text/html; charset=utf-8".to_string()
 }
 
 /// Listener (bind address + optional TLS).
@@ -76,17 +172,45 @@ pub struct ListenerConfig {
 }
 
 /// TLS certificate configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TlsConfig {
-    /// Path to the PEM certificate file.
-    pub cert_path: PathBuf,
+    /// Path to the PEM certificate file. Optional when ACME is enabled
+    /// (then it is the fallback certificate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<PathBuf>,
 
     /// Path to the PEM private key file.
-    pub key_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<PathBuf>,
 
     /// Minimum TLS version. Defaults to "1.2".
     #[serde(default = "default_tls_min_version")]
     pub min_version: String,
+
+    /// ACME (HTTP-01) certificate automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme: Option<AcmeConfig>,
+}
+
+/// ACME automation for one listener.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcmeConfig {
+    /// ACME directory URL.
+    pub directory_url: String,
+
+    /// Contact e-mail for the ACME account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+
+    /// Extra PEM CA bundle to trust for the directory (private/test CAs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_bundle: Option<PathBuf>,
+
+    /// Account + certificate storage directory.
+    pub storage_dir: PathBuf,
+
+    /// Domains to keep certificates for.
+    pub domains: Vec<String>,
 }
 
 /// Upstream / backend origin configuration.
@@ -620,4 +744,26 @@ pub enum ConfigError {
 
     #[error("File watch error: {0}")]
     WatchError(String),
+}
+
+#[cfg(test)]
+mod host_policy_tests {
+    use super::{lookup_host_policy, HostPolicy};
+
+    fn policy(host: &str) -> HostPolicy {
+        HostPolicy { host: host.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn most_specific_host_policy_wins() {
+        let policies = vec![policy("*"), policy("*.example.com"), policy("*.api.example.com"), policy("www.example.com")];
+        let find = |h| lookup_host_policy(&policies, h).map(|p| p.host.as_str());
+        assert_eq!(find("www.example.com"), Some("www.example.com"));
+        assert_eq!(find("WWW.Example.com"), Some("www.example.com"));
+        assert_eq!(find("v1.api.example.com"), Some("*.api.example.com"));
+        assert_eq!(find("shop.example.com"), Some("*.example.com"));
+        assert_eq!(find("example.com"), Some("*"), "wildcard needs a subdomain");
+        assert_eq!(find("badexample.com"), Some("*"), "suffix must be label-aligned");
+        assert_eq!(lookup_host_policy(&policies[1..2], "other.org"), None);
+    }
 }

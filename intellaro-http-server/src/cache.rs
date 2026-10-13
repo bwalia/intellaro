@@ -9,13 +9,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use http_body_util::BodyExt;
 use hyper::{Method, Request, Response};
 use serde::Serialize;
 use tracing::{debug, info};
 
 use crate::config::CacheConfig;
-use crate::server::BoxBody;
+use crate::server::{full, BoxBody};
 
 /// A cached HTTP response with metadata.
 #[derive(Clone, Debug)]
@@ -74,7 +73,7 @@ impl CachedEntry {
         builder = builder.header("X-Intellaro-Cache", cache_status);
 
         builder
-            .body(BoxBody::new(hyper::body::Bytes::from(self.body.clone())))
+            .body(full(hyper::body::Bytes::from(self.body.clone())))
             .ok()
     }
 }
@@ -249,8 +248,22 @@ impl CacheLayer {
         None
     }
 
-    /// Store a response in the cache if it is cacheable.
-    pub async fn store<B>(&self, req: &Request<B>, resp: &Response<BoxBody>) {
+    /// Whether a response with this status to this request would be stored.
+    /// Lets the data plane decide to buffer a body before it streams it.
+    pub fn should_store<B, R>(&self, req: &Request<B>, resp: &Response<R>) -> bool {
+        self.config.enabled
+            && self.is_cacheable_request(req)
+            && self.is_cacheable_response(resp)
+            && !self.resolve_ttl(resp).is_zero()
+            && !resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.starts_with("text/event-stream"))
+    }
+
+    /// Store a (buffered) response in the cache if it is cacheable.
+    pub async fn store<B>(&self, req: &Request<B>, resp: &Response<hyper::body::Bytes>) {
         self.store_with_tags(req, resp, &[]).await;
     }
 
@@ -258,7 +271,7 @@ impl CacheLayer {
     pub async fn store_with_tags<B>(
         &self,
         req: &Request<B>,
-        resp: &Response<BoxBody>,
+        resp: &Response<hyper::body::Bytes>,
         tags: &[String],
     ) {
         if !self.config.enabled {
@@ -287,13 +300,7 @@ impl CacheLayer {
             .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
             .collect();
 
-        let body = resp
-            .body()
-            .clone()
-            .collect()
-            .await
-            .map(|collected| collected.to_bytes().to_vec())
-            .unwrap_or_default();
+        let body = resp.body().to_vec();
 
         let entry = CachedEntry {
             status: resp.status().as_u16(),
@@ -400,7 +407,7 @@ impl CacheLayer {
     }
 
     /// Determine if a response is eligible for caching.
-    fn is_cacheable_response(&self, resp: &Response<BoxBody>) -> bool {
+    fn is_cacheable_response<R>(&self, resp: &Response<R>) -> bool {
         let status = resp.status().as_u16();
 
         // Only cache successful responses and 301/304.
@@ -408,7 +415,7 @@ impl CacheLayer {
     }
 
     /// Resolve the TTL for a cached response, respecting Cache-Control headers.
-    fn resolve_ttl(&self, resp: &Response<BoxBody>) -> Duration {
+    fn resolve_ttl<R>(&self, resp: &Response<R>) -> Duration {
         // Check for Cache-Control: max-age directive
         if let Some(cc) = resp.headers().get("cache-control").and_then(|v| v.to_str().ok()) {
             for directive in cc.split(',').map(str::trim) {

@@ -14,7 +14,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use tracing::{debug, warn};
 
 use crate::config::{JwtConfig, SecurityConfig};
-use crate::server::BoxBody;
+use crate::server::{full, BoxBody};
 
 /// Security engine that evaluates all security policies against incoming requests.
 pub struct SecurityEngine {
@@ -228,7 +228,7 @@ fn forbidden_response(message: &str) -> Response<BoxBody> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .header("Content-Type", "text/plain")
-        .body(BoxBody::new(hyper::body::Bytes::from(
+        .body(full(hyper::body::Bytes::from(
             message.to_string(),
         )))
         .unwrap()
@@ -240,7 +240,7 @@ fn unauthorized_response(message: &str) -> Response<BoxBody> {
         .status(StatusCode::UNAUTHORIZED)
         .header("Content-Type", "text/plain")
         .header("WWW-Authenticate", "Bearer")
-        .body(BoxBody::new(hyper::body::Bytes::from(
+        .body(full(hyper::body::Bytes::from(
             message.to_string(),
         )))
         .unwrap()
@@ -252,7 +252,7 @@ fn rate_limited_response() -> Response<BoxBody> {
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header("Content-Type", "text/plain")
         .header("Retry-After", "60")
-        .body(BoxBody::new(hyper::body::Bytes::from(
+        .body(full(hyper::body::Bytes::from(
             "Too Many Requests",
         )))
         .unwrap()

@@ -27,6 +27,6 @@ pub mod priority;
 pub mod state;
 
 // Re-export primary public API.
-pub use config::RouterConfig;
-pub use engine::RoutingEngine;
+pub use config::{RouterConfig, RuleAction};
+pub use engine::{RouteOutcome, RoutingEngine};
 pub use state::RouterState;

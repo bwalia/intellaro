@@ -33,6 +33,8 @@ pub struct BackendState {
     pub active_connections: AtomicU64,
     pub total_requests: AtomicU64,
     pub total_errors: AtomicU64,
+    /// Smooth weighted-round-robin accumulator (nginx algorithm).
+    pub current_weight: std::sync::atomic::AtomicI64,
 }
 
 impl BackendState {
@@ -44,6 +46,7 @@ impl BackendState {
             active_connections: AtomicU64::new(0),
             total_requests: AtomicU64::new(0),
             total_errors: AtomicU64::new(0),
+            current_weight: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -132,25 +135,32 @@ impl BackendGroup {
             .map(|b| Arc::clone(b))
     }
 
+    /// Smooth weighted round-robin (nginx algorithm): interleaves backends
+    /// proportionally instead of walking weight blocks, so an 80/20 split
+    /// looks like a,a,a,a,b,… rather than 80×a followed by 20×b.
     fn select_weighted(&self, healthy: &[&Arc<BackendState>]) -> Option<Arc<BackendState>> {
-        let total_weight: u64 = healthy.iter().map(|b| b.weight as u64).sum();
+        let total_weight: i64 = healthy.iter().map(|b| b.weight as i64).sum();
         if total_weight == 0 {
             return self.select_round_robin(healthy);
         }
 
-        // Use the round-robin counter as a deterministic pseudo-random source.
-        let point = self.rr_counter.fetch_add(1, Ordering::Relaxed) % total_weight;
-        let mut cumulative = 0u64;
+        let mut best: Option<&Arc<BackendState>> = None;
+        let mut best_current = i64::MIN;
 
         for backend in healthy {
-            cumulative += backend.weight as u64;
-            if point < cumulative {
-                return Some(Arc::clone(backend));
+            let current = backend
+                .current_weight
+                .fetch_add(backend.weight as i64, Ordering::Relaxed)
+                + backend.weight as i64;
+            if current > best_current {
+                best_current = current;
+                best = Some(backend);
             }
         }
 
-        // Fallback (shouldn't reach here).
-        Some(Arc::clone(healthy[0]))
+        let selected = best?;
+        selected.current_weight.fetch_sub(total_weight, Ordering::Relaxed);
+        Some(Arc::clone(selected))
     }
 
     fn select_random(&self, healthy: &[&Arc<BackendState>]) -> Option<Arc<BackendState>> {
@@ -228,5 +238,42 @@ pub fn record_error_by_id(registry: &BackendRegistry, group_name: &str, backend_
         if let Some(backend) = group.backends.iter().find(|b| b.id == backend_id) {
             backend.total_errors.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod smooth_wrr_tests {
+    use super::*;
+
+    #[test]
+    fn smooth_wrr_interleaves_and_honors_weights() {
+        let group = BackendGroup::new(
+            "t",
+            vec![
+                Backend { id: "a".into(), weight: 80, healthy: true },
+                Backend { id: "b".into(), weight: 20, healthy: true },
+            ],
+            BalancerStrategy::Weighted,
+        );
+
+        let mut picks = Vec::new();
+        for _ in 0..100 {
+            picks.push(group.select(None).unwrap().id.clone());
+        }
+        for backend in picks.iter() {
+            // release the connection we "opened"
+            let _ = backend;
+        }
+
+        let a = picks.iter().filter(|p| *p == "a").count();
+        let b = picks.iter().filter(|p| *p == "b").count();
+        assert_eq!(a, 80, "80/20 over 100 picks");
+        assert_eq!(b, 20);
+
+        // Interleaving: within any window of 10 picks there is at least one b.
+        assert!(
+            picks.chunks(10).all(|w| w.iter().any(|p| p == "b")),
+            "picks must interleave, got {picks:?}"
+        );
     }
 }

@@ -201,9 +201,33 @@ async fn build_routing(
             }
         }
 
-        if spec.rewrite.is_some() {
-            warn!(route = %name, "Path/host rewrite is not wired into the data plane yet — ignored");
-        }
+        // Path rewrite: strip the matched prefix, optionally replacing it.
+        let (strip_path_prefix, rewrite_prefix_with) = match &spec.rewrite {
+            Some(rw) if rw.replace_path_prefix.is_some() => match &spec.r#match.path_prefix {
+                Some(prefix) => (Some(prefix.clone()), rw.replace_path_prefix.clone()),
+                None => {
+                    warn!(route = %name, "rewrite.replacePathPrefix requires match.pathPrefix — ignored");
+                    (None, None)
+                }
+            },
+            Some(rw) => {
+                if rw.replace_host.is_some() {
+                    warn!(route = %name, "rewrite.replaceHost is not supported yet — ignored");
+                }
+                (None, None)
+            }
+            None => (None, None),
+        };
+
+        // Request/response header manipulation.
+        let header_manipulation = spec.headers.as_ref().map(|hp| {
+            json!({
+                "request_set": hp.request_set.iter().map(|kv| (kv.name.clone(), json!(kv.value))).collect::<serde_json::Map<_, _>>(),
+                "response_set": hp.response_set.iter().map(|kv| (kv.name.clone(), json!(kv.value))).collect::<serde_json::Map<_, _>>(),
+                "request_remove": hp.request_remove,
+                "response_remove": hp.response_remove,
+            })
+        });
 
         for hostname in &vhost.hostnames {
             rules.push(json!({
@@ -216,8 +240,12 @@ async fn build_routing(
                     "path_regex": spec.r#match.path_regex,
                     "methods": spec.r#match.methods,
                     "headers": headers,
+                    "source_cidrs": spec.r#match.source_cidrs,
                 },
                 "backend_group": group_name,
+                "strip_path_prefix": strip_path_prefix,
+                "rewrite_prefix_with": rewrite_prefix_with,
+                "headers": header_manipulation,
                 "timeout_secs": spec.timeout_secs,
                 "enabled": true,
             }));

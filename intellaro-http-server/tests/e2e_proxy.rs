@@ -214,3 +214,152 @@ async fn ops_endpoints_report_health_and_readiness() {
     let resp = client.get(format!("{base}/nope")).send().await.unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+fn v1_phase1_config(listen_port: u16, backend: SocketAddr) -> String {
+    format!(
+        r#"
+apiVersion: intellaro.io/v1
+kind: Gateway
+metadata: {{ name: phase1 }}
+spec:
+  listeners:
+    - {{ name: http, address: "127.0.0.1", port: {listen_port} }}
+  fallback:
+    status: 404
+    body: "<h1>no such host</h1>"
+  hosts:
+    - name: phase1.test
+      routes:
+        - match:
+            path: {{ type: Exact, value: /old-login }}
+          action: {{ type: redirect, location: "https://sso.example.com/login", status: 301 }}
+        - match:
+            path: {{ type: Prefix, value: /blocked }}
+          action:
+            type: static
+            status: 403
+            bodyBase64: "PGgxPmJsb2NrZWQ8L2gxPg=="
+            contentType: text/html
+        - match:
+            path: {{ type: Prefix, value: /api }}
+          backends: [{{ address: "{backend}" }}]
+          rewrite: {{ stripPrefix: /api }}
+          requestHeaders:
+            set: {{ X-Injected: "phase1" }}
+          responseHeaders:
+            set: {{ X-Powered-By: "intellaro" }}
+        - match:
+            path: {{ type: Prefix, value: / }}
+            sourceCidrs: ["127.0.0.0/8"]
+          backends: [{{ address: "{backend}" }}]
+"#
+    )
+}
+
+/// Backend that echoes the request path and selected headers.
+async fn spawn_echo_backend() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(move |req: Request<Incoming>| async move {
+                    let reply = format!(
+                        "path={}|xfp={}|inj={}",
+                        req.uri().path(),
+                        req.headers()
+                            .get("x-forwarded-proto")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or(""),
+                        req.headers()
+                            .get("x-injected")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or(""),
+                    );
+                    Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from(reply))))
+                });
+                let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn phase1_actions_rewrites_headers_fallback() {
+    let backend = spawn_echo_backend().await;
+    let port = free_port();
+
+    let dir = std::env::temp_dir().join(format!("intellaro-p1-{}-{port}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("gateway.yaml");
+    std::fs::write(&config_path, v1_phase1_config(port, backend)).unwrap();
+
+    let manager = ConfigManager::load(&config_path).unwrap();
+    let config = manager.get().await;
+    assert_eq!(config.fallback.mode, "not_found");
+
+    let engine = bootstrap::build_routing_engine(&config);
+    let ready = Arc::new(AtomicBool::new(false));
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(server::run(manager.clone(), shutdown_rx, engine, Some(ready.clone())));
+    for _ in 0..200 {
+        if ready.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ready.load(Ordering::Relaxed));
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let host = |req: reqwest::RequestBuilder| req.header("Host", "phase1.test");
+
+    // Redirect action (301 + Location).
+    let resp = host(client.get(format!("{base}/old-login"))).send().await.unwrap();
+    assert_eq!(resp.status(), 301);
+    assert_eq!(
+        resp.headers().get("location").unwrap(),
+        "https://sso.example.com/login"
+    );
+
+    // Static action: 403 with base64-decoded body.
+    let resp = host(client.get(format!("{base}/blocked/page"))).send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.text().await.unwrap(), "<h1>blocked</h1>");
+
+    // Strip prefix + request header injection + X-Forwarded-Proto +
+    // response header set.
+    let resp = host(client.get(format!("{base}/api/users?x=1"))).send().await.unwrap();
+    assert_eq!(resp.headers().get("x-powered-by").unwrap(), "intellaro");
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("path=/users"), "prefix not stripped: {text}");
+    assert!(text.contains("xfp=http"), "missing X-Forwarded-Proto: {text}");
+    assert!(text.contains("inj=phase1"), "request header not injected: {text}");
+
+    // Source-CIDR route matches loopback clients.
+    let resp = host(client.get(format!("{base}/anything"))).send().await.unwrap();
+    assert!(resp.text().await.unwrap().contains("path=/anything"));
+
+    // Unknown host → branded fallback page, not first-upstream proxying.
+    let resp = client
+        .get(format!("{base}/whatever"))
+        .header("Host", "unknown.test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.text().await.unwrap(), "<h1>no such host</h1>");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

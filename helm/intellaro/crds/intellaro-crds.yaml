@@ -301,6 +301,11 @@ spec:
                     description: Match requests whose path matches this regex.
                     nullable: true
                     type: string
+                  sourceCidrs:
+                    description: Client source IPs/CIDRs to match.
+                    items:
+                      type: string
+                    type: array
                 type: object
               priority:
                 default: 100

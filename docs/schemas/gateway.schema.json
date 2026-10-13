@@ -123,6 +123,29 @@
       },
       "additionalProperties": false
     },
+    "FallbackPage": {
+      "description": "Branded fallback page for unmatched requests.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contentType": {
+          "default": "text/html; charset=utf-8",
+          "type": "string"
+        },
+        "status": {
+          "default": 404,
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "GatewaySpec": {
       "type": "object",
       "required": [
@@ -130,6 +153,17 @@
         "listeners"
       ],
       "properties": {
+        "fallback": {
+          "description": "Page served when no route matches (WSLProxy `no_server` parity). Omitted = requests fall through to the default proxy behavior.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FallbackPage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "hosts": {
           "description": "Virtual hosts served by this gateway.",
           "type": "array",
@@ -142,6 +176,25 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Listener"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "HeaderOps": {
+      "description": "Header set/remove operations.",
+      "type": "object",
+      "properties": {
+        "remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
           }
         }
       },
@@ -319,6 +372,17 @@
       "description": "A single route: match conditions plus a destination and its policies.",
       "type": "object",
       "properties": {
+        "action": {
+          "description": "Direct response action (static page or redirect) instead of proxying. WSLProxy response-code parity: 200/403 static, 301/302 redirect; omitted = proxy.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RouteAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "backends": {
           "description": "Inline backend pool. Mutually exclusive with `upstreamRef`.",
           "type": "array",
@@ -376,6 +440,39 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "requestHeaders": {
+          "description": "Headers to set/remove on the proxied request.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HeaderOps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responseHeaders": {
+          "description": "Headers to set/remove on the response.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HeaderOps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rewrite": {
+          "description": "Path rewrite applied before forwarding.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RouteRewrite"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "timeouts": {
           "description": "Proxy timeouts for this route.",
           "anyOf": [
@@ -396,6 +493,77 @@
         }
       },
       "additionalProperties": false
+    },
+    "RouteAction": {
+      "description": "Direct response action for a route.",
+      "oneOf": [
+        {
+          "description": "Serve a static response (block/landing pages).",
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "body": {
+              "description": "Plain text/HTML body.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body_base64": {
+              "description": "Base64-encoded body (WSLProxy stored pages this way).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "default": 200,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "static"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Redirect to a location (301/302/303/307/308).",
+          "type": "object",
+          "required": [
+            "location",
+            "type"
+          ],
+          "properties": {
+            "location": {
+              "type": "string"
+            },
+            "status": {
+              "default": 302,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "redirect"
+              ]
+            }
+          }
+        }
+      ]
     },
     "RouteHealthCheck": {
       "type": "object",
@@ -441,6 +609,34 @@
               "$ref": "#/definitions/PathMatch"
             }
           ]
+        },
+        "sourceCidrs": {
+          "description": "Client source IPs/CIDRs to match.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteRewrite": {
+      "description": "Path rewrite: strip a prefix and optionally replace it.",
+      "type": "object",
+      "required": [
+        "stripPrefix"
+      ],
+      "properties": {
+        "replaceWith": {
+          "description": "Replacement for the stripped prefix (defaults to empty).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stripPrefix": {
+          "description": "Prefix to strip from the request path (usually the matched prefix).",
+          "type": "string"
         }
       },
       "additionalProperties": false

@@ -1,0 +1,36 @@
+# Intellaro POP config (legacy flat format — includes the management API,
+# which the intellaro.io/v1 schema does not carry yet).
+#
+# Ports chosen to coexist with an existing ingress on 80/443:
+#   8088 data plane · 9098 ops (/health /ready /metrics) · 9099 MCP API
+listeners:
+  - address: "0.0.0.0:8088"
+    protocol: auto
+
+upstreams:
+  - name: pop-echo
+    servers:
+      - { address: "127.0.0.1:9001", weight: 2 }
+      - { address: "127.0.0.1:9002", weight: 1 }
+    load_balancing: weighted
+    health_check:
+      path: /
+      interval_secs: 5
+      unhealthy_threshold: 2
+
+router:
+  rules:
+    - name: pop-test
+      priority: 100
+      match:
+        host: intellaro-pop.fictionally.org
+      backend_group: pop-echo
+
+logging:
+  level: info
+  format: json
+  metrics_path: /metrics
+  ops_address: "0.0.0.0:9098"
+
+management_api:
+  address: "127.0.0.1:9099"
