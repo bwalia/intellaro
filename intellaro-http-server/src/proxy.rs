@@ -20,6 +20,7 @@ use hyper::body::{Body, Bytes, Frame, SizeHint};
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::upgrade::OnUpgrade;
 use hyper::{Request, Response, StatusCode};
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -32,8 +33,9 @@ use intellaro_http_router::config::HeaderManipulation;
 use crate::config::{BackendServer, HealthCheckConfig, UpstreamConfig};
 use crate::server::{full, stream, BoxBody, BoxError};
 
-/// Pooled upstream client; request bodies are streamed `BoxBody`s.
-type UpstreamClient = HyperClient<HttpConnector, BoxBody>;
+/// Pooled upstream client (plain or TLS by URI scheme); request bodies
+/// are streamed `BoxBody`s.
+type UpstreamClient = HyperClient<HttpsConnector<HttpConnector>, BoxBody>;
 
 /// Upstream TCP connect timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -205,9 +207,11 @@ impl ProxyEngine {
             upstreams.insert(config.name.clone(), state);
         }
 
-        let mut connector = HttpConnector::new();
-        connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
-        connector.set_nodelay(true);
+        let mut http = HttpConnector::new();
+        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+        http.set_nodelay(true);
+        http.enforce_http(false);
+        let connector = https_connector(http);
 
         let http_client = HyperClient::builder(TokioExecutor::new())
             .pool_max_idle_per_host(100)
@@ -308,7 +312,8 @@ impl ProxyEngine {
                 .map(|pq| pq.as_str())
                 .unwrap_or("/")
         });
-        let uri: hyper::Uri = format!("http://{backend_address}{path}")
+        let (backend_scheme, backend_authority) = backend_origin(backend_address);
+        let uri: hyper::Uri = format!("{backend_scheme}://{backend_authority}{path}")
             .parse()
             .map_err(|err: hyper::http::uri::InvalidUri| ProxyError::BackendError(err.to_string()))?;
 
@@ -510,7 +515,8 @@ async fn health_check_loop(
         }
 
         for (i, backend) in upstream.backends.iter().enumerate() {
-            let url = format!("http://{}{}", backend.server.address, path);
+            let (scheme, authority) = backend_origin(&backend.server.address);
+            let url = format!("{scheme}://{authority}{path}");
 
             let is_healthy = matches!(
                 client.get(&url).send().await,
@@ -545,6 +551,38 @@ async fn health_check_loop(
             }
         }
     }
+}
+
+/// Split a backend address into (scheme, authority). Addresses are
+/// `host:port` (plain HTTP) or `https://host:port` (TLS to the backend,
+/// certificate verified, SNI = host).
+pub fn backend_origin(address: &str) -> (&'static str, &str) {
+    if let Some(rest) = address.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = address.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        ("http", address)
+    }
+}
+
+/// HTTP + HTTPS connector. Backend certificates are verified against the
+/// system trust store (internal CAs installed on the host work), falling
+/// back to the bundled Mozilla roots when the system store is unavailable.
+fn https_connector(http: HttpConnector) -> HttpsConnector<HttpConnector> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let builder = match hyper_rustls::HttpsConnectorBuilder::new().with_native_roots() {
+        Ok(builder) => builder,
+        Err(err) => {
+            warn!(%err, "System trust store unavailable — using bundled web PKI roots");
+            hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots()
+        }
+    };
+    builder
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .wrap_connector(http)
 }
 
 /// Hop-by-hop headers that must not be forwarded (RFC 9110 §7.6.1).

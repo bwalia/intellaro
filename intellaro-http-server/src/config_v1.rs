@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use base64::Engine as _;
 use intellaro_config::{
-    ActiveHealthCheck, BackoffStrategy, ConfigSet, Gateway, HeaderOps, ListenerProtocol,
+    AcmeSettings, ActiveHealthCheck, BackoffStrategy, ConfigSet, Gateway, HeaderOps, Hsts, ListenerProtocol,
     LoadBalancing, PathMatchType, Route, RouteAction, WafMode, WafPolicy,
 };
 use intellaro_http_router::config::{
@@ -28,8 +28,8 @@ use intellaro_http_router::config::{
 };
 
 use crate::config::{
-    BackendServer, CacheConfig, CircuitBreakerConfig, ConfigError, FallbackConfig,
-    HealthCheckConfig, JwtConfig, ListenerConfig, LoggingConfig, RateLimitConfig, RetryConfig,
+    AcmeConfig, BackendServer, CacheConfig, CircuitBreakerConfig, ConfigError, FallbackConfig,
+    HealthCheckConfig, HostPolicy, JwtConfig, ListenerConfig, LoggingConfig, RateLimitConfig, RetryConfig,
     SecurityConfig, ServerConfig, TlsConfig, UpstreamConfig,
 };
 
@@ -78,11 +78,36 @@ pub fn compile(set: &ConfigSet) -> Result<CompiledConfig, ConfigError> {
         });
     }
 
+    let mut host_policies: Vec<HostPolicy> = Vec::new();
+
     // ── Gateways: listeners + routes ─────────────────────────────────
     for gateway in &set.gateways {
         compile_listeners(gateway, &mut listeners, &mut warnings)?;
 
+        // Redirect target port: the gateway's first HTTPS listener.
+        let https_port = gateway
+            .spec
+            .listeners
+            .iter()
+            .find(|l| l.protocol == ListenerProtocol::Https)
+            .map(|l| l.port);
+
         for host in &gateway.spec.hosts {
+            if host.force_https || host.hsts.is_some() {
+                if host.force_https && https_port.is_none() {
+                    warnings.push(format!(
+                        "host {:?}: forceHttps without an HTTPS listener — redirecting to port 443 \
+                         (assumes TLS is terminated in front of intellaro)",
+                        host.name
+                    ));
+                }
+                host_policies.push(HostPolicy {
+                    host: host.name.clone(),
+                    force_https: host.force_https,
+                    https_port,
+                    hsts: host.hsts.as_ref().map(render_hsts),
+                });
+            }
             for (idx, route) in host.routes.iter().enumerate() {
                 let group = if route.action.is_some() {
                     // Static/redirect routes never reach a backend.
@@ -138,6 +163,7 @@ pub fn compile(set: &ConfigSet) -> Result<CompiledConfig, ConfigError> {
         }),
         tenants: Vec::new(),
         fallback,
+        host_policies,
     };
 
     Ok(CompiledConfig { config, warnings })
@@ -161,16 +187,15 @@ fn compile_listeners(
         let tls = match listener.protocol {
             ListenerProtocol::Https => {
                 let tls = listener.tls.as_ref().expect("validated: HTTPS has tls");
-                if tls.acme.as_ref().is_some_and(|a| a.enabled) {
-                    warnings.push(format!(
-                        "listener {:?}: ACME automation is Phase 1 — using the provided static certificate",
-                        listener.name
-                    ));
-                }
+                let acme = match tls.acme.as_ref().filter(|a| a.enabled) {
+                    Some(acme) => Some(compile_acme(gateway, &listener.name, acme, warnings)?),
+                    None => None,
+                };
                 Some(TlsConfig {
-                    cert_path: PathBuf::from(tls.cert_path.as_ref().expect("validated")),
-                    key_path: PathBuf::from(tls.key_path.as_ref().expect("validated")),
+                    cert_path: tls.cert_path.as_ref().map(PathBuf::from),
+                    key_path: tls.key_path.as_ref().map(PathBuf::from),
                     min_version: tls.min_version.clone().unwrap_or_else(|| "1.2".to_string()),
+                    acme,
                 })
             }
             ListenerProtocol::Http => None,
@@ -281,6 +306,82 @@ fn to_routing_rule(
         ),
         enabled: true,
     }
+}
+
+/// Let's Encrypt directories.
+const LETSENCRYPT_PRODUCTION: &str = "https://acme-v02.api.letsencrypt.org/directory";
+const LETSENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+/// Resolve a listener's ACME settings: directory, storage, and the domain
+/// list (explicit, or the gateway's exact host names).
+fn compile_acme(
+    gateway: &Gateway,
+    listener_name: &str,
+    acme: &AcmeSettings,
+    warnings: &mut Vec<String>,
+) -> Result<AcmeConfig, ConfigError> {
+    let domains: Vec<String> = if acme.domains.is_empty() {
+        let mut names = Vec::new();
+        for host in &gateway.spec.hosts {
+            let name = host.name.to_ascii_lowercase();
+            if name == "*" || name.starts_with("*.") || name.parse::<std::net::IpAddr>().is_ok() {
+                if name != "*" {
+                    warnings.push(format!(
+                        "listener {listener_name:?}: ACME skips host {name:?} (wildcards and IPs need DNS-01 / are not issuable)"
+                    ));
+                }
+                continue;
+            }
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    } else {
+        acme.domains.iter().map(|d| d.to_ascii_lowercase()).collect()
+    };
+    if domains.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "gateway {:?} listener {listener_name:?}: acme enabled but there are no issuable domains \
+             (add exact host names or acme.domains)",
+            gateway.metadata.name
+        )));
+    }
+
+    let directory_url = acme.directory_url.clone().unwrap_or_else(|| {
+        if acme.staging { LETSENCRYPT_STAGING } else { LETSENCRYPT_PRODUCTION }.to_string()
+    });
+    let has_port_80 = gateway
+        .spec
+        .listeners
+        .iter()
+        .any(|l| l.protocol == ListenerProtocol::Http && l.port == 80);
+    if !has_port_80 {
+        warnings.push(format!(
+            "listener {listener_name:?}: ACME HTTP-01 needs port 80 to reach an HTTP listener; \
+             none is declared on port 80 (fine if a NAT/port-forward maps it)"
+        ));
+    }
+
+    Ok(AcmeConfig {
+        directory_url,
+        email: acme.email.clone(),
+        ca_bundle: acme.ca_bundle.as_ref().map(PathBuf::from),
+        storage_dir: PathBuf::from(&acme.storage_dir),
+        domains,
+    })
+}
+
+/// Render a `Strict-Transport-Security` header value.
+fn render_hsts(hsts: &Hsts) -> String {
+    let mut value = format!("max-age={}", hsts.max_age.as_secs());
+    if hsts.include_subdomains {
+        value.push_str("; includeSubDomains");
+    }
+    if hsts.preload {
+        value.push_str("; preload");
+    }
+    value
 }
 
 /// Map the v1 action onto the router's rule action, decoding base64

@@ -36,7 +36,9 @@ pub struct Metadata {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Backend {
-    /// Backend address, `host:port` (e.g. `10.8.0.9:6443`, `app.internal:8080`).
+    /// Backend address, `host:port` (e.g. `10.8.0.9:6443`, `app.internal:8080`),
+    /// or `https://host:port` to connect over TLS (certificate verified
+    /// against the system trust store; SNI is the host).
     pub address: String,
 
     /// Relative weight for weighted balancing. Defaults to 1.
@@ -236,8 +238,8 @@ pub struct TlsSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_version: Option<String>,
 
-    /// ACME (Let's Encrypt) automation. Schema-reserved: automation lands
-    /// in Phase 1; until then certPath/keyPath must be provided.
+    /// ACME (Let's Encrypt) HTTP-01 automation. When enabled,
+    /// certPath/keyPath are optional and serve as the fallback certificate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acme: Option<AcmeSettings>,
 }
@@ -259,9 +261,31 @@ pub struct AcmeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
 
-    /// Use the staging directory (recommended while testing).
+    /// Use the Let's Encrypt staging directory (recommended while testing).
     #[serde(default)]
     pub staging: bool,
+
+    /// Custom ACME directory URL (overrides `staging`), e.g. a private CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_url: Option<String>,
+
+    /// PEM CA bundle to trust when talking to the ACME directory (for
+    /// private/test CAs such as Pebble). Public CAs need nothing here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_bundle: Option<String>,
+
+    /// Where the ACME account and issued certificates are stored.
+    #[serde(default = "default_acme_storage")]
+    pub storage_dir: String,
+
+    /// Domains to obtain certificates for. Defaults to the gateway's
+    /// exact host names (wildcards need DNS-01 and are skipped).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
+}
+
+fn default_acme_storage() -> String {
+    "/var/lib/intellaro/acme".to_string()
 }
 
 /// A virtual host: a hostname plus its ordered routes.
@@ -272,8 +296,41 @@ pub struct Host {
     /// and the catch-all `"*"`.
     pub name: String,
 
+    /// Redirect plain-HTTP requests for this host to HTTPS (301 for
+    /// GET/HEAD, 308 otherwise). ACME HTTP-01 challenges are exempt.
+    /// Requests arriving with `X-Forwarded-Proto: https` (TLS terminated
+    /// by a front proxy) are not redirected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_https: bool,
+
+    /// HTTP Strict Transport Security, sent on HTTPS responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsts: Option<Hsts>,
+
     /// Routes evaluated for requests to this host.
     pub routes: Vec<Route>,
+}
+
+/// `Strict-Transport-Security` settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Hsts {
+    /// How long browsers must use HTTPS only (default one year).
+    #[serde(default = "default_hsts_max_age")]
+    pub max_age: HumanDuration,
+
+    /// Apply to all subdomains.
+    #[serde(default)]
+    pub include_subdomains: bool,
+
+    /// Request inclusion in browser preload lists. Requires
+    /// `includeSubdomains` and a `maxAge` of at least one year.
+    #[serde(default)]
+    pub preload: bool,
+}
+
+fn default_hsts_max_age() -> HumanDuration {
+    HumanDuration::from_secs(31_536_000)
 }
 
 /// A single route: match conditions plus a destination and its policies.

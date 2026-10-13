@@ -13,6 +13,7 @@
 //!
 //! Use [`bootstrap::run`] to start the full server from a config path.
 
+pub mod acme;
 pub mod audit;
 pub mod bootstrap;
 pub mod cache;
@@ -29,4 +30,5 @@ pub mod rbac;
 pub mod security;
 pub mod server;
 pub mod tenant;
+pub mod tls;
 pub mod transform;

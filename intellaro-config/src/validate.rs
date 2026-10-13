@@ -2,7 +2,7 @@
 //!
 //! The loader guarantees shape; this module guarantees meaning: unique
 //! names, resolvable references, sane ports/weights, and Phase-0 support
-//! boundaries (e.g. ACME and TCP probes are schema-reserved, not yet live).
+//! boundaries (e.g. TCP probes are schema-reserved, not yet live).
 
 use std::collections::HashSet;
 
@@ -97,6 +97,13 @@ pub fn validate(set: &ConfigSet) -> Result<(), ConfigV1Error> {
             if host.routes.is_empty() {
                 errors.push(format!("{hctx}: at least one route is required"));
             }
+            if let Some(hsts) = &host.hsts {
+                if hsts.preload && (!hsts.include_subdomains || hsts.max_age.as_secs() < 31_536_000) {
+                    errors.push(format!(
+                        "{hctx}: hsts.preload requires includeSubdomains and maxAge of at least 1 year"
+                    ));
+                }
+            }
 
             for (idx, route) in host.routes.iter().enumerate() {
                 let rctx = format!("{hctx} route[{idx}]");
@@ -177,12 +184,26 @@ fn validate_tls(ctx: &str, tls: &TlsSettings, errors: &mut Vec<String>) {
     let has_static = tls.cert_path.is_some() && tls.key_path.is_some();
     let acme_on = tls.acme.as_ref().is_some_and(|a| a.enabled);
 
-    if acme_on && !has_static {
+    if tls.cert_path.is_some() != tls.key_path.is_some() {
+        errors.push(format!("{ctx}: certPath and keyPath must be set together"));
+    } else if !acme_on && !has_static {
         errors.push(format!(
-            "{ctx}: ACME automation lands in Phase 1 — provide certPath/keyPath for now"
+            "{ctx}: certPath and keyPath are required for HTTPS unless acme.enabled"
         ));
-    } else if !has_static {
-        errors.push(format!("{ctx}: certPath and keyPath are required for HTTPS"));
+    }
+    if let Some(acme) = tls.acme.as_ref().filter(|a| a.enabled) {
+        if let Some(url) = &acme.directory_url {
+            if !url.starts_with("https://") {
+                errors.push(format!("{ctx}: acme.directoryUrl must be an https:// URL"));
+            }
+        }
+        for domain in &acme.domains {
+            if domain.starts_with("*.") {
+                errors.push(format!(
+                    "{ctx}: acme domain {domain:?}: wildcards need DNS-01, which is not supported yet"
+                ));
+            }
+        }
     }
 
     if let Some(v) = &tls.min_version {
@@ -286,8 +307,21 @@ fn validate_backends(ctx: &str, backends: &[Backend], errors: &mut Vec<String>) 
         if backend.weight == 0 {
             errors.push(format!("{ctx}: backend {:?} weight must be >= 1", backend.address));
         }
-        // host:port shape — permissive on host (DNS names allowed), strict on port.
-        match backend.address.rsplit_once(':') {
+        // [http(s)://]host:port — permissive on host (DNS names allowed),
+        // strict on scheme and port.
+        let address = backend
+            .address
+            .strip_prefix("https://")
+            .or_else(|| backend.address.strip_prefix("http://"))
+            .unwrap_or(&backend.address);
+        if address.contains("://") || address.contains('/') {
+            errors.push(format!(
+                "{ctx}: backend {:?} must be host:port or https://host:port (no other schemes or paths)",
+                backend.address
+            ));
+            continue;
+        }
+        match address.rsplit_once(':') {
             Some((host, port)) if !host.is_empty() => {
                 if port.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
                     errors.push(format!(

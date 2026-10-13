@@ -23,10 +23,20 @@ use tracing::{debug, error, info, warn};
 
 use crate::cache::CacheLayer;
 use crate::circuit_breaker::{self, CircuitBreakerRegistry};
-use crate::config::{ConfigManager, FallbackConfig, ListenerConfig, StaticRootConfig};
+use crate::config::{
+    lookup_host_policy, AcmeConfig, ConfigManager, FallbackConfig, HostPolicy, ListenerConfig, StaticRootConfig,
+};
 use crate::logging;
 use crate::proxy::ProxyEngine;
 use crate::security::SecurityEngine;
+use crate::tls::CertStore;
+use tokio_rustls::TlsAcceptor;
+
+/// Time allowed for a client to complete the TLS handshake.
+const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often static TLS certificates are re-read from disk.
+const CERT_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Boxed error type carried by streaming bodies.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -69,6 +79,7 @@ pub struct AppState {
     pub routing_engine: Option<RoutingEngine>,
     pub circuit_breakers: CircuitBreakerRegistry,
     pub fallback: FallbackConfig,
+    pub host_policies: Vec<HostPolicy>,
 }
 
 /// Start the HTTP server with all configured listeners.
@@ -91,14 +102,76 @@ pub async fn run(
     // changing bind addresses still requires a restart.
     let (state_tx, state_rx) = watch::channel(state);
 
+    // One certificate store per HTTPS listener. A bad certificate at
+    // startup is fatal; later reload failures keep the last good one.
+    let mut tls_stores: Vec<(SocketAddr, Arc<CertStore>)> = Vec::new();
+    for listener in &config.listeners {
+        if let Some(tls) = &listener.tls {
+            let store = CertStore::new();
+            store
+                .set_static(tls)
+                .map_err(|err| format!("listener {}: {err}", listener.address))?;
+            tls_stores.push((listener.address, store));
+        }
+    }
+
+    // ACME managers, one per ACME-enabled listener; reloads push updated
+    // domain lists through the watch channels.
+    let mut acme_senders: Vec<(SocketAddr, watch::Sender<AcmeConfig>)> = Vec::new();
+    let mut acme_tasks = Vec::new();
+    for listener in &config.listeners {
+        if let Some(acme) = listener.tls.as_ref().and_then(|t| t.acme.clone()) {
+            let store = tls_stores
+                .iter()
+                .find(|(addr, _)| *addr == listener.address)
+                .map(|(_, s)| s.clone())
+                .expect("store created for every TLS listener");
+            let (tx, rx) = watch::channel(acme);
+            acme_tasks.push(crate::acme::spawn(listener.address, rx, store));
+            acme_senders.push((listener.address, tx));
+        }
+    }
+
     let mut change_rx = config_manager.subscribe();
     let reload_manager = config_manager.clone();
+    let reload_stores = tls_stores.clone();
     let reload_task = tokio::spawn(async move {
         loop {
             if change_rx.changed().await.is_err() {
                 break;
             }
             let new_config = reload_manager.get().await;
+            // Certificate paths may change with the config; files may have
+            // been rotated in place either way.
+            for (address, store) in &reload_stores {
+                let paths = new_config
+                    .listeners
+                    .iter()
+                    .find(|l| l.address == *address)
+                    .and_then(|l| l.tls.as_ref());
+                let result = match paths {
+                    Some(tls) => store.set_static(tls),
+                    None => store.reload_static(),
+                };
+                if let Err(err) = result {
+                    warn!(%address, %err, "TLS certificate reload failed — keeping previous certificate");
+                }
+            }
+            for (address, tx) in &acme_senders {
+                let acme = new_config
+                    .listeners
+                    .iter()
+                    .find(|l| l.address == *address)
+                    .and_then(|l| l.tls.as_ref())
+                    .and_then(|t| t.acme.clone());
+                if let Some(acme) = acme {
+                    tx.send_if_modified(|current| {
+                        let changed = *current != acme;
+                        *current = acme;
+                        changed
+                    });
+                }
+            }
             let engine = crate::bootstrap::build_routing_engine(&new_config);
             let new_state = build_app_state(reload_manager.clone(), &new_config, engine);
             if state_tx.send(new_state).is_err() {
@@ -108,10 +181,33 @@ pub async fn run(
         }
     });
 
+    // Pick up certificates rotated on disk (cert-manager, certbot) even
+    // when the config itself does not change.
+    let rotation_stores: Vec<Arc<CertStore>> = tls_stores.iter().map(|(_, s)| s.clone()).collect();
+    let rotation_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(CERT_RELOAD_INTERVAL);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            crate::tls::reload_all(&rotation_stores);
+        }
+    });
+
     let mut listener_handles = Vec::new();
 
     for listener_config in &config.listeners {
-        let handle = spawn_listener(listener_config.clone(), state_rx.clone()).await?;
+        let acceptor = match &listener_config.tls {
+            Some(tls) => {
+                let store = tls_stores
+                    .iter()
+                    .find(|(addr, _)| *addr == listener_config.address)
+                    .map(|(_, s)| s.clone())
+                    .expect("store created for every TLS listener");
+                Some(crate::tls::build_acceptor(&tls.min_version, store)?)
+            }
+            None => None,
+        };
+        let handle = spawn_listener(listener_config.clone(), state_rx.clone(), acceptor).await?;
         listener_handles.push(handle);
     }
 
@@ -138,6 +234,10 @@ pub async fn run(
         handle.abort();
     }
     reload_task.abort();
+    rotation_task.abort();
+    for task in acme_tasks {
+        task.abort();
+    }
 
     info!("Server shut down gracefully");
     Ok(())
@@ -169,6 +269,7 @@ fn build_app_state(
         routing_engine,
         circuit_breakers,
         fallback: config.fallback.clone(),
+        host_policies: config.host_policies.clone(),
     })
 }
 
@@ -176,6 +277,7 @@ fn build_app_state(
 async fn spawn_listener(
     listener_config: ListenerConfig,
     state_rx: watch::Receiver<Arc<AppState>>,
+    acceptor: Option<TlsAcceptor>,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let tcp_listener = TcpListener::bind(listener_config.address).await?;
 
@@ -186,28 +288,50 @@ async fn spawn_listener(
         "Listener bound"
     );
 
-    let scheme: &'static str = if listener_config.tls.is_some() { "https" } else { "http" };
     let handle = tokio::spawn(async move {
-        accept_loop(tcp_listener, state_rx, scheme).await;
+        accept_loop(tcp_listener, state_rx, acceptor).await;
     });
 
     Ok(handle)
 }
 
-/// Core accept loop — accepts TCP connections and spawns a task per connection.
+/// Core accept loop — accepts TCP connections and spawns a task per
+/// connection, completing the TLS handshake first on HTTPS listeners.
 async fn accept_loop(
     listener: TcpListener,
     state_rx: watch::Receiver<Arc<AppState>>,
-    scheme: &'static str,
+    acceptor: Option<TlsAcceptor>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let state_rx = state_rx.clone();
+                let acceptor = acceptor.clone();
                 metrics::gauge!("active_connections").increment(1.0);
 
                 tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, peer_addr, state_rx, scheme).await {
+                    let _ = stream.set_nodelay(true);
+                    let result = match acceptor {
+                        None => handle_connection(stream, peer_addr, state_rx, "http").await,
+                        Some(acceptor) => {
+                            match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                                Ok(Ok(tls_stream)) => {
+                                    handle_connection(tls_stream, peer_addr, state_rx, "https").await
+                                }
+                                Ok(Err(err)) => {
+                                    metrics::counter!("tls_handshake_errors_total").increment(1);
+                                    debug!(%peer_addr, %err, "TLS handshake failed");
+                                    Ok(())
+                                }
+                                Err(_) => {
+                                    metrics::counter!("tls_handshake_errors_total").increment(1);
+                                    debug!(%peer_addr, "TLS handshake timed out");
+                                    Ok(())
+                                }
+                            }
+                        }
+                    };
+                    if let Err(err) = result {
                         warn!(%peer_addr, %err, "Connection error");
                     }
                     metrics::gauge!("active_connections").decrement(1.0);
@@ -224,12 +348,15 @@ async fn accept_loop(
 ///
 /// State is resolved per request (not per connection) so long-lived
 /// keep-alive connections observe config reloads immediately.
-async fn handle_connection(
-    stream: tokio::net::TcpStream,
+async fn handle_connection<S>(
+    stream: S,
     peer_addr: SocketAddr,
     state_rx: watch::Receiver<Arc<AppState>>,
     scheme: &'static str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let io = TokioIo::new(stream);
 
     let service = hyper::service::service_fn(move |req: Request<Incoming>| {
@@ -247,8 +374,81 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Central request handler: security -> cache -> proxy -> static.
+/// Transport policy layer around the pipeline: force-HTTPS redirects
+/// before anything else runs, HSTS on every HTTPS response after.
 async fn handle_request(
+    req: Request<Incoming>,
+    peer_addr: SocketAddr,
+    state: Arc<AppState>,
+    scheme: &'static str,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    // ACME HTTP-01 challenges are answered before any policy, security
+    // check or redirect can interfere with validation.
+    if req.uri().path().starts_with(crate::acme::CHALLENGE_PREFIX) {
+        if let Some(response) = crate::acme::challenge_response(req.uri().path()) {
+            return Ok(response);
+        }
+    }
+
+    let host = crate::proxy::request_host(&req).map(|h| strip_host_port(h).to_string());
+    let policy = host
+        .as_deref()
+        .and_then(|h| lookup_host_policy(&state.host_policies, h))
+        .cloned();
+    let Some(policy) = policy else {
+        return handle_pipeline(req, peer_addr, state, scheme).await;
+    };
+
+    // A front proxy that terminated TLS reports the original scheme.
+    let secure = scheme == "https"
+        || req
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"));
+
+    if policy.force_https && !secure && !req.uri().path().starts_with(crate::acme::CHALLENGE_PREFIX) {
+        let response = https_redirect(&req, host.as_deref().unwrap_or_default(), policy.https_port);
+        logging::record_response(response.status().as_u16(), req.method().as_str());
+        metrics::counter!("https_redirects_total").increment(1);
+        return Ok(response);
+    }
+
+    let mut response = handle_pipeline(req, peer_addr, state, scheme).await?;
+    if secure {
+        if let Some(hsts) = policy.hsts.as_deref() {
+            if let Ok(value) = hyper::header::HeaderValue::from_str(hsts) {
+                response
+                    .headers_mut()
+                    .insert(hyper::header::STRICT_TRANSPORT_SECURITY, value);
+            }
+        }
+    }
+    Ok(response)
+}
+
+/// 301 (GET/HEAD) or 308 (methods with bodies) to the HTTPS URL.
+fn https_redirect<B>(req: &Request<B>, host: &str, https_port: Option<u16>) -> Response<BoxBody> {
+    let mut location = format!("https://{host}");
+    if let Some(port) = https_port.filter(|p| *p != 443) {
+        location.push_str(&format!(":{port}"));
+    }
+    location.push_str(req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+    let status = if matches!(*req.method(), hyper::Method::GET | hyper::Method::HEAD) {
+        StatusCode::MOVED_PERMANENTLY
+    } else {
+        StatusCode::PERMANENT_REDIRECT
+    };
+    Response::builder()
+        .status(status)
+        .header(hyper::header::LOCATION, location)
+        .body(full(Bytes::new()))
+        .unwrap_or_else(|_| internal_error_response())
+}
+
+/// Central request pipeline: security -> cache -> static -> routing -> proxy.
+async fn handle_pipeline(
     req: Request<Incoming>,
     peer_addr: SocketAddr,
     state: Arc<AppState>,
