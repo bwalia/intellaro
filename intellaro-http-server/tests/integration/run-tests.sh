@@ -154,11 +154,11 @@ assert_body_contains "Config contains test-upstream" \
     "test-upstream" \
     -H "X-Api-Key: ${API_KEY}" "${MCP}/api/v1/config"
 
-# 1.4 Config PUT (not implemented — should return 501)
-assert_status "PUT /api/v1/config returns 501 (not implemented)" \
-    "501" \
+# 1.4 Config PUT rejects an invalid config (and leaves the running one alone)
+assert_status "PUT /api/v1/config with invalid config returns 422" \
+    "422" \
     -X PUT -H "X-Api-Key: ${API_KEY}" -H "Content-Type: application/json" \
-    -d '{}' "${MCP}/api/v1/config"
+    -d '{"upstreams": "not-a-list"}' "${MCP}/api/v1/config"
 
 # 1.5 Config reload
 assert_status "POST /api/v1/config/reload returns 200" \
