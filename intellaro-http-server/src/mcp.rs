@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 
 use crate::config::{ConfigManager, ManagementApiConfig};
-use crate::server::BoxBody;
+use crate::server::{full, BoxBody};
 
 /// Represents a standard JSON API response envelope.
 #[derive(Serialize)]
@@ -389,7 +389,7 @@ impl McpServer {
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/html; charset=utf-8")
-            .body(BoxBody::new(hyper::body::Bytes::from(html)))
+            .body(full(hyper::body::Bytes::from(html)))
             .unwrap()
     }
 
@@ -597,7 +597,7 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<BoxBody
         .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Headers", "X-Api-Key, Content-Type")
         .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        .body(BoxBody::new(hyper::body::Bytes::from(json_bytes)))
+        .body(full(hyper::body::Bytes::from(json_bytes)))
         .unwrap()
 }
 
@@ -609,6 +609,6 @@ fn cors_preflight() -> Response<BoxBody> {
         .header("Access-Control-Allow-Headers", "X-Api-Key, Content-Type")
         .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         .header("Access-Control-Max-Age", "86400")
-        .body(BoxBody::new(hyper::body::Bytes::new()))
+        .body(full(hyper::body::Bytes::new()))
         .unwrap()
 }

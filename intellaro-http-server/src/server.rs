@@ -28,11 +28,36 @@ use crate::logging;
 use crate::proxy::ProxyEngine;
 use crate::security::SecurityEngine;
 
-/// Full-body response type used throughout the server.
-pub type BoxBody = http_body_util::Full<hyper::body::Bytes>;
+/// Boxed error type carried by streaming bodies.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Maximum buffered request body size (Phase-0 store-and-forward cap).
+/// Body type used throughout the data plane: either a fully-buffered
+/// payload (generated pages, cache hits) or a streamed upstream/client body.
+pub type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>;
+
+/// Wrap a complete payload as a `BoxBody`.
+pub fn full(bytes: impl Into<Bytes>) -> BoxBody {
+    http_body_util::Full::new(bytes.into())
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+/// Box a streamed body (client request or upstream response).
+pub fn stream<B>(body: B) -> BoxBody
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<BoxError>,
+{
+    body.map_err(Into::into).boxed_unsync()
+}
+
+/// Maximum buffered request body size when a body must be replayable
+/// (retry-enabled upstreams). Everything else streams.
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Largest response body buffered for the cache; larger (or unknown-length
+/// bodies that grow past it) stream through uncached.
+const MAX_CACHEABLE_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Shared application state accessible from all request handlers.
 pub struct AppState {
@@ -213,8 +238,10 @@ async fn handle_connection(
         async move { handle_request(req, addr, state, scheme).await }
     });
 
+    // `with_upgrades` keeps the socket available to hyper::upgrade so
+    // WebSocket (and other HTTP/1.1 upgrade) requests can be tunnelled.
     ConnectionBuilder::new(TokioExecutor::new())
-        .serve_connection(io, service)
+        .serve_connection_with_upgrades(io, service)
         .await?;
 
     Ok(())
@@ -233,29 +260,13 @@ async fn handle_request(
 
     logging::record_request(&method, &path);
 
-    // Buffer the request body up-front (bounded) so it can be forwarded
-    // and replayed across retries. Streaming pass-through is Phase 1.
-    let (parts, body) = req.into_parts();
-    let body_bytes: Bytes =
-        match http_body_util::Limited::new(body, MAX_REQUEST_BODY_BYTES).collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(err) => {
-                let too_large = err.downcast_ref::<http_body_util::LengthLimitError>().is_some();
-                let status = if too_large {
-                    StatusCode::PAYLOAD_TOO_LARGE
-                } else {
-                    StatusCode::BAD_REQUEST
-                };
-                warn!(%path, too_large, "Failed to read request body");
-                logging::record_response(status.as_u16(), &method);
-                return Ok(Response::builder()
-                    .status(status)
-                    .body(BoxBody::new(hyper::body::Bytes::from(
-                        status.canonical_reason().unwrap_or("error").to_string(),
-                    )))
-                    .unwrap());
-            }
-        };
+    // The body is held unread and streamed straight upstream when the
+    // request is forwarded; it is only buffered when a retry policy needs
+    // to replay it. The client's upgrade handle (WebSocket) travels with
+    // the forward so the connection can be tunnelled after a 101.
+    let (mut parts, body) = req.into_parts();
+    let on_upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
+    let mut req_body: Option<Incoming> = Some(body);
     // Body-less view of the request for match/cache/security layers.
     let req_view: Request<()> = Request::from_parts(parts, ());
     let req = &req_view;
@@ -281,7 +292,7 @@ async fn handle_request(
 
     // 3. Static file serving
     if let Some(response) = serve_static_file(&path, &state.static_roots).await {
-        state.cache_layer.store(req, &response).await;
+        let response = cache_and_finalize(&state, req, response).await;
         let status = response.status().as_u16();
         logging::record_response(status, &method);
         logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -320,7 +331,7 @@ async fn handle_request(
                     "Routing engine decision"
                 );
 
-                let opts = crate::proxy::ForwardOptions {
+                let mut opts = crate::proxy::ForwardOptions {
                     client_addr: peer_addr,
                     scheme,
                     path_override: rewrite_path(
@@ -329,11 +340,14 @@ async fn handle_request(
                         decision.rewrite_prefix_with.as_deref(),
                     ),
                     headers: decision.header_manipulation.clone(),
+                    read_timeout: decision.timeout_secs.map(std::time::Duration::from_secs),
+                    upgrade: on_upgrade,
                 };
+                let body = req_body.take().map(stream).unwrap_or_else(|| full(Bytes::new()));
 
                 let response = match state
                     .proxy_engine
-                    .forward_to(req, &decision.backend_id, body_bytes.clone(), &opts)
+                    .forward_to(req, &decision.backend_id, body, &mut opts)
                     .await
                 {
                     Ok(mut resp) => {
@@ -353,14 +367,11 @@ async fn handle_request(
                         engine.release_backend(&decision.backend_state);
                         error!(%err, %path, backend = %decision.backend_id, "Routed proxy error");
                         metrics::counter!("proxy_errors_total").increment(1);
-                        Response::builder()
-                            .status(StatusCode::BAD_GATEWAY)
-                            .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
-                            .unwrap()
+                        proxy_error_response(&err)
                     }
                 };
 
-                state.cache_layer.store(req, &response).await;
+                let response = cache_and_finalize(&state, req, response).await;
                 let status = response.status().as_u16();
                 logging::record_response(status, &method);
                 logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -387,7 +398,7 @@ async fn handle_request(
                 };
                 let response = Response::builder()
                     .status(status_code)
-                    .body(BoxBody::new(hyper::body::Bytes::from(err.to_string())))
+                    .body(full(hyper::body::Bytes::from(err.to_string())))
                     .unwrap();
                 logging::record_response(status_code.as_u16(), &method);
                 logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -405,7 +416,7 @@ async fn handle_request(
             metrics::counter!("circuit_breaker_rejections_total").increment(1);
             let response = Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(BoxBody::new(hyper::body::Bytes::from(
+                .body(full(hyper::body::Bytes::from(
                     "Service Unavailable (circuit breaker open)",
                 )))
                 .unwrap();
@@ -432,17 +443,36 @@ async fn handle_request(
 
     let mut last_response = None;
 
-    let fwd_opts = crate::proxy::ForwardOptions {
+    let mut fwd_opts = crate::proxy::ForwardOptions {
         client_addr: peer_addr,
         scheme,
-        path_override: None,
-        headers: None,
+        upgrade: on_upgrade,
+        ..Default::default()
+    };
+
+    // Retries replay the body, so only then is it buffered (bounded).
+    let replay_body = if max_attempts > 1 {
+        let body = req_body.take().expect("request body unread");
+        match read_body_limited(body).await {
+            Ok(bytes) => Some(bytes),
+            Err(response) => {
+                warn!(%path, status = response.status().as_u16(), "Failed to read request body");
+                logging::record_response(response.status().as_u16(), &method);
+                return Ok(response);
+            }
+        }
+    } else {
+        None
     };
 
     for attempt in 0..max_attempts {
+        let body = match &replay_body {
+            Some(bytes) => full(bytes.clone()),
+            None => req_body.take().map(stream).unwrap_or_else(|| full(Bytes::new())),
+        };
         match state
             .proxy_engine
-            .forward(req, body_bytes.clone(), &fwd_opts)
+            .forward(req, body, &mut fwd_opts)
             .await
         {
             Ok(resp) => {
@@ -471,7 +501,7 @@ async fn handle_request(
                     cb.record_success().await;
                 }
 
-                state.cache_layer.store(req, &resp).await;
+                let resp = cache_and_finalize(&state, req, resp).await;
                 let status = resp.status().as_u16();
                 logging::record_response(status, &method);
                 logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
@@ -499,11 +529,8 @@ async fn handle_request(
 
                 error!(%err, %path, "Proxy error");
                 metrics::counter!("proxy_errors_total").increment(1);
-                let response = Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
-                    .unwrap();
-                logging::record_response(502, &method);
+                let response = proxy_error_response(&err);
+                logging::record_response(response.status().as_u16(), &method);
                 logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
                 return Ok(response);
             }
@@ -514,7 +541,7 @@ async fn handle_request(
     let response = last_response.unwrap_or_else(|| {
         Response::builder()
             .status(StatusCode::BAD_GATEWAY)
-            .body(BoxBody::new(hyper::body::Bytes::from("Bad Gateway")))
+            .body(full(hyper::body::Bytes::from("Bad Gateway")))
             .unwrap()
     });
 
@@ -523,6 +550,100 @@ async fn handle_request(
     logging::record_latency(start.elapsed().as_secs_f64(), &method, &path);
 
     Ok(response)
+}
+
+/// Buffer a request body (bounded) so it can be replayed across retries.
+async fn read_body_limited(body: Incoming) -> Result<Bytes, Response<BoxBody>> {
+    match http_body_util::Limited::new(body, MAX_REQUEST_BODY_BYTES).collect().await {
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(err) => {
+            let status = if err.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            Err(Response::builder()
+                .status(status)
+                .body(full(status.canonical_reason().unwrap_or("error")))
+                .unwrap_or_else(|_| internal_error_response()))
+        }
+    }
+}
+
+/// 502 for a failed upstream exchange, 504 when it timed out.
+fn proxy_error_response(err: &crate::proxy::ProxyError) -> Response<BoxBody> {
+    let (status, body) = match err {
+        crate::proxy::ProxyError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, "Gateway Timeout"),
+        _ => (StatusCode::BAD_GATEWAY, "Bad Gateway"),
+    };
+    Response::builder()
+        .status(status)
+        .body(full(body))
+        .unwrap_or_else(|_| internal_error_response())
+}
+
+/// Store a response in the cache when it is cacheable, then hand it on.
+///
+/// Only cacheable responses are buffered — everything else streams
+/// untouched. A cacheable body that turns out larger than
+/// `MAX_CACHEABLE_BODY_BYTES` is not cached: the bytes read so far are
+/// replayed ahead of the rest of the stream.
+async fn cache_and_finalize(
+    state: &AppState,
+    req: &Request<()>,
+    resp: Response<BoxBody>,
+) -> Response<BoxBody> {
+    if !state.cache_layer.should_store(req, &resp) {
+        return resp;
+    }
+    let declared_len = resp
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared_len.is_some_and(|len| len > MAX_CACHEABLE_BODY_BYTES) {
+        return resp;
+    }
+
+    let (parts, mut body) = resp.into_parts();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match body.frame().await {
+            None => break,
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(data) => {
+                    buf.extend_from_slice(&data);
+                    if buf.len() > MAX_CACHEABLE_BODY_BYTES {
+                        return Response::from_parts(parts, prepend(vec![hyper::body::Frame::data(buf.into())], body));
+                    }
+                }
+                // Trailers are not cached; relay what we have and stop.
+                Err(trailers) => {
+                    return Response::from_parts(
+                        parts,
+                        prepend(vec![hyper::body::Frame::data(buf.into()), trailers], body),
+                    );
+                }
+            },
+            Some(Err(err)) => {
+                warn!(%err, "Upstream body failed while buffering for cache");
+                return proxy_error_response(&crate::proxy::ProxyError::BackendError(err.to_string()));
+            }
+        }
+    }
+
+    let cached = Response::from_parts(parts, Bytes::from(buf));
+    state.cache_layer.store(req, &cached).await;
+    let (parts, bytes) = cached.into_parts();
+    Response::from_parts(parts, full(bytes))
+}
+
+/// A body that yields `frames` first, then the rest of `rest`.
+fn prepend(frames: Vec<hyper::body::Frame<Bytes>>, rest: BoxBody) -> BoxBody {
+    use futures::StreamExt;
+    let head = futures::stream::iter(frames.into_iter().map(Ok::<_, BoxError>));
+    let tail = http_body_util::BodyStream::new(rest);
+    stream(http_body_util::StreamBody::new(head.chain(tail)))
 }
 
 /// Serve a static file if the request path matches a configured static root.
@@ -548,7 +669,7 @@ async fn serve_static_file(
             return Some(
                 Response::builder()
                     .status(StatusCode::FORBIDDEN)
-                    .body(BoxBody::new(hyper::body::Bytes::from("Forbidden")))
+                    .body(full(hyper::body::Bytes::from("Forbidden")))
                     .unwrap(),
             );
         }
@@ -561,7 +682,7 @@ async fn serve_static_file(
                     Response::builder()
                         .status(StatusCode::OK)
                         .header("Content-Type", content_type)
-                        .body(BoxBody::new(hyper::body::Bytes::from(contents)))
+                        .body(full(hyper::body::Bytes::from(contents)))
                         .unwrap(),
                 );
             }
@@ -605,7 +726,7 @@ fn build_action_response(action: &RuleAction) -> Response<BoxBody> {
                     "Content-Type",
                     content_type.as_deref().unwrap_or("text/html; charset=utf-8"),
                 )
-                .body(BoxBody::new(Bytes::from(body.clone().unwrap_or_default())))
+                .body(full(Bytes::from(body.clone().unwrap_or_default())))
                 .unwrap_or_else(|_| internal_error_response())
         }
         RuleAction::Redirect { location, status } => {
@@ -613,7 +734,7 @@ fn build_action_response(action: &RuleAction) -> Response<BoxBody> {
             Response::builder()
                 .status(status)
                 .header("Location", location.as_str())
-                .body(BoxBody::new(Bytes::new()))
+                .body(full(Bytes::new()))
                 .unwrap_or_else(|_| internal_error_response())
         }
     }
@@ -622,7 +743,7 @@ fn build_action_response(action: &RuleAction) -> Response<BoxBody> {
 fn internal_error_response() -> Response<BoxBody> {
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(BoxBody::new(Bytes::from("Internal Server Error")))
+        .body(full(Bytes::from("Internal Server Error")))
         .expect("static response")
 }
 
@@ -640,7 +761,7 @@ fn fallback_response(fallback: &FallbackConfig) -> Response<BoxBody> {
     Response::builder()
         .status(status)
         .header("Content-Type", fallback.content_type.as_str())
-        .body(BoxBody::new(Bytes::from(body)))
+        .body(full(Bytes::from(body)))
         .unwrap_or_else(|_| internal_error_response())
 }
 
@@ -738,7 +859,7 @@ impl OwnedRequestInfo {
         // Extract host, stripping any :port suffix (RFC 9110 §7.2) so
         // vhost rules match requests that arrive on non-default ports
         // (NodePort, dev setups, etc.).
-        let host = headers.get("host").map(|h| strip_host_port(h).to_string());
+        let host = crate::proxy::request_host(req).map(|h| strip_host_port(h).to_string());
 
         // Extract content type
         let content_type = headers.get("content-type").cloned();
